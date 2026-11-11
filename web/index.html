@@ -1,0 +1,727 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>FLOW · 流量出口</title>
+<style>
+:root{
+  --bg:#07090c; --panel:#0d1116; --line:#1b222c; --line-2:#2b3543;
+  --text:#e9edf4; --dim:#8e99ab; --dim-2:#5c6678;
+  --vpn:#7b8fff; --direct:#3ddc97; --dn:#5cc8ff; --up:#ffb35c;
+  --danger:#ff6b6b; --warn:#f5c451; --ok:#3ddc97;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,"Liberation Mono",monospace;
+  --ui:system-ui,-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif;
+  --r:10px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1100px 520px at 12% -12%, #17222f 0%, transparent 62%),
+    radial-gradient(800px 460px at 102% -4%, #131d27 0%, transparent 58%),
+    var(--bg);
+  color:var(--text);
+  font:12.5px/1.5 var(--ui);
+  -webkit-font-smoothing:antialiased;
+  padding:8px;
+}
+.app{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:6px;max-width:940px;margin:0 auto}
+.card{
+  background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,0) 60%),var(--panel);
+  border:1px solid var(--line);border-radius:var(--r);
+  padding:8px 11px;min-width:0;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 18px 40px -32px #000;
+}
+.head{grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:1px 1px 0}
+.brand{display:flex;align-items:baseline;gap:9px}
+.brand b{font-size:12.5px;letter-spacing:.24em;font-weight:650}
+.brand small{color:var(--dim-2);font-size:10px;letter-spacing:.06em}
+.verdict{
+  display:inline-flex;align-items:center;gap:7px;padding:4px 11px 4px 9px;border-radius:999px;
+  border:1px solid var(--line-2);background:rgba(255,255,255,.03);
+  font-weight:600;letter-spacing:.01em;white-space:nowrap;
+}
+.verdict .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.verdict[data-s="vpn"]{color:#c8d2ff;border-color:rgba(123,143,255,.42);background:rgba(123,143,255,.13)}
+.verdict[data-s="vpn"] .dot{box-shadow:0 0 0 4px rgba(123,143,255,.14)}
+.verdict[data-s="direct"]{color:#b9f7da;border-color:rgba(61,220,151,.4);background:rgba(61,220,151,.12)}
+.verdict[data-s="direct"] .dot{box-shadow:0 0 0 4px rgba(61,220,151,.13)}
+.verdict[data-s="mixed"]{color:#ffe3b3;border-color:rgba(245,196,81,.42);background:rgba(245,196,81,.11)}
+.verdict[data-s="down"]{color:#ffd2d2;border-color:rgba(255,107,107,.45);background:rgba(255,107,107,.13)}
+.verdict small{font-weight:400;color:var(--dim);letter-spacing:0;font-size:11px}
+.grow{flex:1}
+.clock{display:flex;align-items:baseline;gap:10px;font-family:var(--mono);font-size:11px;color:var(--dim)}
+.clock b{color:var(--text);font-weight:500;font-size:12px;font-variant-numeric:tabular-nums}
+
+h2{margin:0;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim-2);font-weight:600}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.card-head .note{color:var(--dim);font-size:11.5px}
+
+/* ── 路径 ───────────────────────────────── */
+.route{grid-column:1/-1}
+.lanes{display:grid;gap:7px}
+.lane{
+  border:1px solid var(--line);border-radius:9px;padding:6px 9px 7px;
+  background:rgba(255,255,255,.014);transition:opacity .25s,border-color .25s;
+}
+.lane[data-active="false"]{opacity:.5}
+.lane[data-active="true"][data-kind="vpn"]{border-color:rgba(123,143,255,.4);background:linear-gradient(180deg,rgba(123,143,255,.075),rgba(123,143,255,.012))}
+.lane[data-active="true"][data-kind="direct"]{border-color:rgba(61,220,151,.34);background:linear-gradient(180deg,rgba(61,220,151,.06),rgba(61,220,151,.01))}
+.lane-head{display:flex;align-items:center;gap:7px;margin-bottom:6px;flex-wrap:wrap}
+.badge{
+  font-size:10px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;
+  padding:2.5px 7px;border-radius:5px;border:1px solid;
+}
+.badge.vpn{color:#c8d2ff;border-color:rgba(123,143,255,.45);background:rgba(123,143,255,.13)}
+.badge.direct{color:#b9f7da;border-color:rgba(61,220,151,.42);background:rgba(61,220,151,.11)}
+.lane-title{font-size:11.5px;font-weight:600;letter-spacing:.02em}
+.lane-meta{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+.lane-meta .on{color:var(--ok)}
+.lane-meta .off{color:var(--danger)}
+
+.chain{display:flex;align-items:center;margin:0;padding:0;list-style:none;gap:0}
+.node{
+  min-width:0;flex:1 1 0;padding:4px 9px;border-radius:6px;
+  background:#121821;border:1px solid var(--line);position:relative;z-index:1;
+}
+.node .k{display:block;font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim-2);margin-bottom:1px}
+.node .v{display:block;font-family:var(--mono);font-size:10.5px;color:#dbe2ec;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node .v.ip{color:#fff}
+.link{list-style:none;flex:0 0 20px;height:1px;background:var(--line-2);position:relative;margin:0 6px}
+.link::after{
+  content:"";position:absolute;right:-1px;top:-2.5px;width:5px;height:5px;
+  border-right:1.2px solid var(--line-2);border-top:1.2px solid var(--line-2);
+  transform:rotate(45deg);
+}
+.lane[data-active="true"][data-kind="vpn"] .link{
+  background:repeating-linear-gradient(90deg,rgba(123,143,255,.85) 0 5px,transparent 5px 11px);
+  background-size:11px 1px;
+}
+.lane[data-active="true"][data-kind="direct"] .link{
+  background:repeating-linear-gradient(90deg,rgba(61,220,151,.8) 0 5px,transparent 5px 11px);
+  background-size:11px 1px;
+}
+@media (prefers-reduced-motion:no-preference){
+  .lane[data-active="true"] .link{animation:flow 1.3s linear infinite}
+  @keyframes flow{to{background-position:11px 0}}
+  .verdict[data-s="vpn"] .dot{animation:pulse 2.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(123,143,255,.10)}50%{box-shadow:0 0 0 6px rgba(123,143,255,.05)}}
+}
+.reason{margin-top:7px;font-size:10.5px;color:var(--dim);display:flex;gap:7px;align-items:flex-start}
+.reason svg{flex:none;margin-top:2px;opacity:.6}
+
+/* ── 速率 ───────────────────────────────── */
+.throughput{grid-column:span 7}
+.probes{grid-column:span 5}
+.rates{display:flex;gap:18px;align-items:flex-end;margin-bottom:2px}
+.rate{min-width:0}
+.rate .cap{display:flex;align-items:center;gap:5px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim-2)}
+.rate .val{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.1}
+.rate.dn .val{font-size:19px;color:var(--dn)}
+.rate.up .val{font-size:14px;color:var(--up)}
+.rate .unit{font-size:11px;color:var(--dim);margin-left:5px;letter-spacing:0}
+.chart{position:relative;height:40px;margin:3px 0 2px}
+.chart .scale{position:absolute;right:2px;top:-4px;font:10px/1 var(--mono);color:var(--dim-2);letter-spacing:.02em}
+.sites-empty{padding:10px 2px 4px;font-size:10.5px;color:var(--dim-2)}
+.chart svg{display:block;width:100%;height:100%}
+.totals{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);font-size:10px;color:var(--dim);
+  border-top:1px solid var(--line);padding-top:5px;margin-top:2px}
+.totals b{color:#c6cfdc;font-weight:500}
+
+/* ── 探测 ───────────────────────────────── */
+.prow{display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.035);font-size:10.5px}
+.prow:last-of-type{border-bottom:0}
+.prow .nm{color:var(--dim);min-width:62px}
+.prow .res{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.pill{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid;letter-spacing:.05em}
+.pill.ok{color:#b9f7da;border-color:rgba(61,220,151,.4);background:rgba(61,220,151,.1)}
+.pill.bad{color:#ffd2d2;border-color:rgba(255,107,107,.4);background:rgba(255,107,107,.1)}
+.pill.idle{color:var(--dim);border-color:var(--line-2);background:transparent}
+.strip{margin-top:6px}
+.strip .lbl{display:flex;justify-content:space-between;font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim-2);margin-bottom:3px}
+.strip svg{display:block;width:100%;height:12px}
+
+/* ── 站点 ───────────────────────────────── */
+.sites{grid-column:1/-1}
+.site{display:grid;grid-template-columns:150px minmax(0,1fr) 148px;
+  align-items:center;gap:10px;padding:4px 0;border-top:1px solid rgba(255,255,255,.04)}
+.site:first-child{border-top:0}
+.site-id{min-width:0;display:flex;align-items:center;gap:8px}
+.site-name{font-family:var(--mono);font-size:11.5px;color:#e3e9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.site-sub{display:none}
+.tag{font-size:9px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;
+  padding:1.5px 5px;border-radius:4px;border:1px solid;flex:none}
+.tag[data-via="vpn"]{color:#c8d2ff;border-color:rgba(123,143,255,.4);background:rgba(123,143,255,.12)}
+.tag[data-via="direct"]{color:#b9f7da;border-color:rgba(61,220,151,.4);background:rgba(61,220,151,.1)}
+.tag[data-via="idle"]{color:var(--dim-2);border-color:var(--line);background:transparent}
+.site-spark svg{display:block;width:100%;height:18px;overflow:visible}
+.site-nums .u{font-size:10px;color:var(--dim-2);margin-left:2px}
+.site-nums{display:flex;gap:10px;font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums;
+  white-space:nowrap;justify-content:flex-end}
+.site-nums .n{display:inline-flex;align-items:baseline;gap:3px}
+.site-nums .n.dn{color:var(--dn)}
+.site-nums .n.up{color:var(--up)}
+.site-nums i{font-style:normal;font-size:10px;opacity:.75}
+.site-nums .n.idle{color:var(--dim-2)}
+.extras{margin-top:6px;border-top:1px solid var(--line);padding-top:6px;
+  font-family:var(--mono);font-size:10.5px;color:var(--dim-2);display:flex;flex-wrap:wrap;gap:5px 14px}
+.extras:empty{display:none}
+.extras span b{color:var(--dim);font-weight:400}
+
+footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:10px;color:var(--dim-2);padding:1px 3px 2px}
+
+@media (max-width:760px){
+  .throughput,.probes{grid-column:1/-1}
+}
+@media (max-width:520px){
+  body{padding:10px}
+  .rate.dn .val{font-size:26px}
+  .site{grid-template-columns:minmax(0,1fr) auto;gap:6px 10px}
+  .site-spark{grid-column:1/-1;grid-row:2}
+  .node{flex:none}
+  .node .v{font-size:10.5px}
+  .lane-meta{margin-left:0;flex-basis:100%;order:9}
+  .rates{gap:14px}
+  .chain{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .chain .link{display:none}
+}
+/* ── 站点增删 ──────────────────────────── */
+.sites-ops{display:flex;align-items:center;gap:9px}
+.mini{font:inherit;font-size:10.5px;color:var(--dim);background:rgba(255,255,255,.04);
+  border:1px solid var(--line-2);border-radius:6px;padding:2px 8px;cursor:pointer;white-space:nowrap}
+.mini:hover{color:var(--text);border-color:#3d4a5c;background:rgba(255,255,255,.07)}
+.site-form{margin:0 0 5px}
+.site-form input{width:100%;font:11.5px/1.4 var(--mono);color:var(--text);background:#0a0e13;
+  border:1px solid var(--line-2);border-radius:6px;padding:4px 8px;outline:none}
+.site-form input:focus{border-color:rgba(123,143,255,.6)}
+.site-del{opacity:0;transition:opacity .15s,color .15s;font:12px/1 var(--ui);color:var(--dim-2);
+  background:none;border:0;cursor:pointer;padding:0 1px;flex:none}
+.site:hover .site-del,.site-del:focus-visible{opacity:1}
+.site-del:hover{color:var(--danger)}
+.extras button{font-family:var(--mono);font-size:10.5px;color:var(--dim-2);background:none;border:0;
+  padding:0;cursor:pointer;display:inline-flex;align-items:baseline;gap:4px}
+.extras button:hover{color:var(--text)}
+.extras button b{color:var(--dim);font-weight:400}
+.extras .ex-lbl{color:var(--dim-2);letter-spacing:.08em}
+#toast{position:fixed;left:50%;bottom:14px;transform:translateX(-50%) translateY(6px);opacity:0;
+  pointer-events:none;background:rgba(20,26,34,.97);border:1px solid var(--line-2);border-radius:7px;
+  padding:5px 11px;font-size:11px;color:var(--text);transition:opacity .2s,transform .2s;z-index:9}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" aria-hidden="true" style="position:absolute;pointer-events:none">
+  <defs>
+    <linearGradient id="gSite" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" style="stop-color:var(--dn);stop-opacity:.18"/>
+      <stop offset="100%" style="stop-color:var(--dn);stop-opacity:0"/>
+    </linearGradient>
+  </defs>
+</svg>
+<main class="app">
+
+  <div class="head">
+    <div class="brand"><b>FLOW</b><small>流量出口监视</small></div>
+    <div class="verdict" id="verdict" data-s="idle" aria-live="polite">
+      <span class="dot"></span>
+      <span id="verdictText">连接中…</span>
+      <small id="verdictSub"></small>
+    </div>
+    <div class="grow"></div>
+    <div class="clock"><b id="clock">--:--:--</b><span id="uptime"></span></div>
+  </div>
+
+  <section class="card route">
+    <div class="card-head"><h2>出口路径</h2><span class="note" id="modeNote">—</span></div>
+
+    <div class="lanes">
+      <article class="lane" id="laneVpn" data-kind="vpn" data-active="false">
+        <div class="lane-head">
+          <span class="badge vpn">VPN</span>
+          <span class="lane-title">代理隧道</span>
+          <span class="lane-meta" id="vpnMeta">—</span>
+        </div>
+        <ol class="chain">
+          <li class="node"><span class="k">本机</span><span class="v" id="vpnLocal">—</span></li>
+          <li class="link"></li>
+          <li class="node"><span class="k">网卡</span><span class="v" id="vpnNic">—</span></li>
+          <li class="link"></li>
+          <li class="node"><span class="k">节点</span><span class="v" id="vpnNode">—</span></li>
+          <li class="link"></li>
+          <li class="node"><span class="k">出口</span><span class="v ip" id="vpnExit">—</span></li>
+        </ol>
+      </article>
+
+      <article class="lane" id="laneDirect" data-kind="direct" data-active="false">
+        <div class="lane-head">
+          <span class="badge direct">直连</span>
+          <span class="lane-title">不经代理</span>
+          <span class="lane-meta" id="dirMeta">—</span>
+        </div>
+        <ol class="chain">
+          <li class="node"><span class="k">本机</span><span class="v" id="dirLocal">—</span></li>
+          <li class="link"></li>
+          <li class="node"><span class="k">网卡</span><span class="v" id="dirNic">—</span></li>
+          <li class="link"></li>
+          <li class="node"><span class="k">出口</span><span class="v ip" id="dirExit">—</span></li>
+        </ol>
+      </article>
+    </div>
+
+  </section>
+
+  <section class="card throughput">
+    <div class="card-head"><h2>实时吞吐</h2><span class="note" id="tpNote">经隧道</span></div>
+    <div class="rates">
+      <div class="rate dn"><div class="cap">↓ 下行</div><div class="val"><span id="dnRate">0</span><span class="unit" id="dnUnit">B/s</span></div></div>
+      <div class="rate up"><div class="cap">↑ 上行</div><div class="val"><span id="upRate">0</span><span class="unit" id="upUnit">B/s</span></div></div>
+    </div>
+    <div class="chart"><span class="scale" id="chartScale">—</span><svg id="mainSpark" viewBox="0 0 100 40" preserveAspectRatio="none">
+      <defs><linearGradient id="gDn" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" style="stop-color:var(--dn);stop-opacity:.13"/>
+        <stop offset="100%" style="stop-color:var(--dn);stop-opacity:0"/>
+      </linearGradient></defs>
+      <line x1="0" y1="20" x2="100" y2="20" style="stroke:var(--line)" stroke-width="1" stroke-dasharray="2 4" vector-effect="non-scaling-stroke"/>
+      <path id="dnArea" fill="url(#gDn)" d=""/>
+      <path id="dnLine" fill="none" style="stroke:var(--dn)" stroke-width="1.4" stroke-linejoin="round" d=""/>
+      <path id="upLine" fill="none" style="stroke:var(--up)" stroke-width="1" stroke-opacity=".85" stroke-linejoin="round" d=""/>
+    </svg></div>
+    <div class="totals">
+      <span>本次 ↓ <b id="dnTotal">0 B</b></span>
+      <span>本次 ↑ <b id="upTotal">0 B</b></span>
+      <span>连接 <b id="connCount">0</b></span>
+    </div>
+  </section>
+
+  <section class="card probes">
+    <div class="card-head"><h2>通道探测</h2><span class="note" id="probeNote">—</span></div>
+    <div class="prow"><span class="nm">代理通道</span><span class="pill idle" id="pvPill">—</span><span class="res" id="pvRes">—</span></div>
+    <div class="prow"><span class="nm">直连目标</span><span class="pill idle" id="pdPill">—</span><span class="res" id="pdRes">—</span></div>
+    <div class="prow"><span class="nm">直连对照</span><span class="pill idle" id="pcPill">—</span><span class="res" id="pcRes">—</span></div>
+    <div class="strip">
+      <div class="lbl"><span>近 15 分钟</span><span id="stripStat">—</span></div>
+      <svg id="stripSvg" viewBox="0 0 96 22" preserveAspectRatio="none"></svg>
+    </div>
+  </section>
+
+  <section class="card sites">
+    <div class="card-head">
+      <h2>站点</h2>
+      <div class="sites-ops">
+        <span class="note">按域名归并 · 1s 采样</span>
+        <button class="mini" id="addSiteBtn" title="添加要盯的域名">＋ 域名</button>
+      </div>
+    </div>
+    <form class="site-form" id="siteForm" hidden>
+      <input id="siteInput" placeholder="example.com · 回车添加，Esc 取消" autocomplete="off" spellcheck="false">
+    </form>
+    <div id="sites"></div>
+    <div class="extras" id="extras"></div>
+  </section>
+
+  <footer>
+    <span id="footLeft">—</span>
+    <span id="footRight">—</span>
+  </footer>
+</main>
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const NS = "http://www.w3.org/2000/svg";
+
+  const HIST = 120;
+  const hist = { total: [], vpnSites: new Map() };
+  let strip = [];
+  let lastProbeTs = 0;
+  let bought = 0;
+  const rowCache = new Map();
+  let lastPing = 0;
+
+  /* ── 格式化 ── */
+  function split(v) {
+    if (!v || v < 1) return ["0", "B"];
+    const u = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0, n = v;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return [n >= 10 ? Math.round(n) : +n.toFixed(1), u[i]];
+  }
+  const fmtRate = v => { const [n, u] = split(v); return [n, u + "/s"]; };
+  const fmtBytes = v => { const [n, u] = split(v); return n + " " + u; };
+  const fmtMs = ms => (ms == null ? "—" : ms < 0 ? "不通" : ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(2) + " s");
+  const hhmmss = t => new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  /* ── 迷你曲线 ── */
+  function buildPath(vals, w, h, max, close) {
+    if (!vals.length) return "";
+    const n = vals.length;
+    const step = n > 1 ? w / (n - 1) : w;
+    let d = "";
+    for (let i = 0; i < n; i++) {
+      const x = i * step;
+      const y = h - Math.min(1, vals[i] / max) * (h - 1.5) - 0.75;
+      d += (i ? "L" : "M") + x.toFixed(2) + " " + y.toFixed(2);
+    }
+    if (close) d += `L${w} ${h}L0 ${h}Z`;
+    return d;
+  }
+
+  const scales = new Map();
+  function autoMax(key, peak, floor) {
+    const prev = scales.get(key) || floor;
+    const next = Math.max(floor, peak * 1.25, prev * 0.95);
+    scales.set(key, next);
+    return next;
+  }
+
+  function renderMainChart() {
+    const h = hist.total;
+    if (h.length < 2) return;
+    let peak = 0;
+    for (const p of h) peak = Math.max(peak, p.d, p.u);
+    const max = autoMax("total", peak, 1024);
+    const dser = h.map(p => p.d), user = h.map(p => p.u);
+    const dmax = Math.max(...dser), umax = Math.max(...user);
+    const hasD = dmax > 0, hasU = umax > max * 0.02;
+    $("#dnLine").setAttribute("d", hasD ? buildPath(dser, 100, 40, max, false) : "");
+    $("#dnArea").setAttribute("d", hasD ? buildPath(dser, 100, 40, max, true) : "");
+    $("#upLine").setAttribute("d", hasU ? buildPath(user, 100, 40, max, false) : "");
+    const [pn, pu] = fmtRate(Math.max(dmax, umax));
+    $("#chartScale").textContent = "峰值 " + pn + " " + pu;
+  }
+
+  /* ── 探测条 ── */
+  function renderStrip() {
+    const svg = $("#stripSvg");
+    const n = 96, w = 100 / n, h = 22, bh = 14, y = (h - bh) / 2;
+    let out = "";
+    for (let i = 0; i < n; i++) {
+      const s = strip[i];
+      let fill = "#1b222c";
+      if (s) fill = s.v ? "var(--ok)" : "var(--danger)"; else fill = "var(--line)";
+      const x = (i * w).toFixed(3);
+      out += `<rect x="${x}" y="${y}" width="${(w * 0.58).toFixed(3)}" height="${bh}" rx="0.9" style="fill:${fill}" opacity="${s ? 0.9 : 0.35}"></rect>`;
+    }
+    svg.innerHTML = out;
+    const ok = strip.filter(s => s.v).length;
+    $("#stripStat").textContent = strip.length ? `${ok}/${strip.length} 成功` : "采集中";
+  }
+
+  /* ── 站点行 ── */
+  function ensureRow(key) {
+    let r = rowCache.get(key);
+    if (r) return r;
+    const el = document.createElement("div");
+    el.className = "site";
+    el.innerHTML = `
+      <div class="site-id">
+        <span class="site-name">${esc(key)}</span>
+        <span class="tag" data-via="idle">—</span>
+        <button class="site-del" title="不再监测这个域名" aria-label="移除">×</button>
+      </div>
+      <div class="site-spark"><svg viewBox="0 0 100 30" preserveAspectRatio="none">
+        <path class="f" fill="url(#gSite)" d=""/>
+        <path class="a" fill="none" style="stroke:var(--dn)" stroke-width="1.3" stroke-linejoin="round" d=""/>
+        <path class="b" fill="none" style="stroke:var(--up)" stroke-width="1" stroke-opacity=".8" stroke-linejoin="round" d=""/>
+      </svg></div>
+      <div class="site-nums">
+        <span class="n dn"><i>↓</i><span class="d">0</span><span class="u">B/s</span></span>
+        <span class="n up"><i>↑</i><span class="u2">0</span><span class="u">B/s</span></span>
+      </div>`;
+    $("#sites").appendChild(el);
+    r = {
+      el,
+      tag: el.querySelector(".tag"),
+      del: el.querySelector(".site-del"),
+      a: el.querySelector("path.a"),
+      b: el.querySelector("path.b"),
+      f: el.querySelector("path.f"),
+      d: el.querySelector(".n.dn .d"),
+      u: el.querySelector(".n.up .u2"),
+      du: el.querySelector(".n.dn .u"),
+      uu: el.querySelector(".n.up .u"),
+      dn: el.querySelector(".n.dn"),
+      up: el.querySelector(".n.up"),
+      title: key
+    };
+    rowCache.set(key, r);
+    return r;
+  }
+
+  function renderSites(sites) {
+    const seen = new Set();
+    for (const s of sites) {
+      const key = s.key === "other" ? "其他" : s.label;
+      seen.add(key);
+      const r = ensureRow(key);
+      const removable = s.key !== "other";
+      r.del.hidden = !removable;
+      if (removable) r.del.onclick = ev => { ev.stopPropagation(); siteAction("remove", s.label); };
+      hist.vpnSites.set(key, hist.vpnSites.get(key) || []);
+      const q = hist.vpnSites.get(key);
+      q.push({ d: s.down, u: s.up });
+      if (q.length > HIST) q.shift();
+
+      let peak = 0;
+      for (const p of q) peak = Math.max(peak, p.d, p.u);
+      const max = autoMax(key, peak, 256);
+      const dser = q.map(p => p.d), user = q.map(p => p.u);
+      const dmax = Math.max(...dser), umax = Math.max(...user);
+      const hasD = dmax > 0, hasU = umax > max * 0.02;
+      r.f.setAttribute("d", hasD ? buildPath(dser, 100, 30, max, true) : "");
+      r.a.setAttribute("d", hasD ? buildPath(dser, 100, 30, max, false) : "");
+      r.b.setAttribute("d", hasU ? buildPath(user, 100, 30, max, false) : "");
+
+      const via = s.via || "idle";
+      r.tag.dataset.via = via;
+      r.tag.textContent = via === "vpn" ? "VPN" : via === "direct" ? "直连" : "空闲";
+      const [dn, dnu] = fmtRate(s.down);
+      const [up, upu] = fmtRate(s.up);
+      r.d.textContent = s.down ? dn : "0";
+      r.u.textContent = s.up ? up : "0";
+      r.du.textContent = dnu;
+      r.uu.textContent = upu;
+      r.dn.classList.toggle("idle", !s.down);
+      r.up.classList.toggle("idle", !s.up);
+      r.el.title = `${s.label} · ${s.conns} 条连接${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}\n累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`;
+    }
+    for (const [key, r] of rowCache) {
+      if (!seen.has(key)) { r.el.remove(); rowCache.delete(key); hist.vpnSites.delete(key); }
+    }
+    const box = $("#sites");
+    let empty = box.querySelector(".sites-empty");
+    if (!sites.length) {
+      if (!empty) {
+        empty = document.createElement("div");
+        empty.className = "sites-empty";
+        empty.textContent = "还没盯任何域名 —— 点右上角「＋ 域名」添加，或点下面的趋势标签";
+        box.appendChild(empty);
+      }
+    } else if (empty) {
+      empty.remove();
+    }
+  }
+
+  /* ── 主渲染 ── */
+  function render(s) {
+    const now = Date.now();
+    lastPing = now;
+
+    /* 判定 */
+    const p = s.path || {};
+    const active = p.active || "down";
+    const vpnLane = active === "vpn" || active === "mixed";
+    const node = s.node || {};
+    const iface = s.iface || {};
+    const eg = s.egress || {};
+    const probes = s.probes || {};
+
+    const vd = $("#verdict");
+    vd.dataset.s = active;
+    const label = { vpn: "走 VPN", direct: "直连", mixed: "部分走 VPN", down: "隧道异常" }[active] || "未知";
+    $("#verdictText").textContent = label;
+    $("#verdictSub").textContent = active === "vpn" && node.name
+      ? `${shortServer(node.server) || node.name} · ${eg.vpn_ip || "出口待测"}`
+      : active === "mixed" ? "系统代理未开 · 仅显式代理的程序经隧道"
+        : active === "direct" ? (eg.direct_ip || "") : "";
+
+    /* 路径 A：VPN */
+    const route = s.route || {};
+    const rv = route.vpn || {}, rd = route.direct || route.vpn || {};
+    const lA = $("#laneVpn");
+    lA.dataset.active = String(vpnLane);
+    $("#vpnLocal").textContent = rv.ip || iface.ip || "—";
+    $("#vpnNic").textContent = rv.ssid || rv.name || iface.ssid || iface.name || "—";
+    $("#vpnNode").textContent = node.server ? shortServer(node.server) + ":" + node.port : "—";
+    $("#vpnExit").textContent = eg.vpn_ip || "待测";
+    const conns = (s.tunnel || {}).conns || 0;
+    $("#vpnMeta").innerHTML = vpnLane
+      ? `<span class="on">承载 ${conns} 条</span> · ${node.rtt != null ? (node.rtt < 0 ? "节点超时" : node.rtt + "ms") : ""}`
+      : `未承载流量${node.rtt >= 0 ? " · 节点 " + node.rtt + "ms" : ""}`;
+
+    /* 路径 B：直连 */
+    const pd = probes.direct || {};
+    const directLane = active === "direct" || active === "mixed";
+    const lB = $("#laneDirect");
+    lB.dataset.active = String(directLane);
+    $("#dirLocal").textContent = rd.ip || iface.ip || "—";
+    $("#dirNic").textContent = rd.ssid || rd.name || "—";
+    $("#dirExit").textContent = eg.direct_ip || "待测";
+    $("#dirMeta").innerHTML = pd.ts
+      ? (pd.ok ? `<span class="on">目标可达 ${fmtMs(pd.ms)}</span>` : `<span class="off">目标不通</span> · 对照 ${
+          (probes.control || {}).ok ? fmtMs(probes.control.ms) : "不通"}`)
+      : "探测中";
+
+    $("#modeNote").textContent = s.tunnel && s.tunnel.up
+      ? `mihomo ${s.tunnel.mode || "?"} · TUN ${s.tunnel.tun ? "开" : "关"} · ${s.tunnel.version || ""}`
+      : "mihomo 无响应";
+    vd.title = p.reason || "";
+
+    /* 吞吐 */
+    const t = s.total || { down: 0, up: 0 };
+    hist.total.push({ d: t.down, u: t.up });
+    if (hist.total.length > HIST) hist.total.shift();
+    const [dnv, dnu] = fmtRate(t.down);
+    const [upv, upu] = fmtRate(t.up);
+    $("#dnRate").textContent = dnv; $("#dnUnit").textContent = dnu;
+    $("#upRate").textContent = upv; $("#upUnit").textContent = upu;
+    renderMainChart();
+    const tn = s.tunnel || {};
+    $("#dnTotal").textContent = fmtBytes(tn.download_total);
+    $("#upTotal").textContent = fmtBytes(tn.upload_total);
+    $("#connCount").textContent = tn.conns ?? 0;
+    $("#tpNote").textContent = active === "down" ? "隧道未连接，无计数"
+      : vpnLane ? "经隧道（全机代理流量）" : "直连流量（隧道未承载）";
+
+    /* 探测 */
+    const pv = probes.vpn || {}, pc = probes.control || {};
+    setProbe("#pvPill", "#pvRes", pv, "代理→目标");
+    setProbe("#pdPill", "#pdRes", pd, "直连→目标");
+    setProbe("#pcPill", "#pcRes", pc, "直连→baidu");
+    $("#probeNote").textContent = pv.ts ? hhmmss(pv.ts) + " 更新" : "—";
+
+    if (pv.ts && pv.ts !== lastProbeTs) {
+      lastProbeTs = pv.ts;
+      strip.push({ v: !!pv.ok, d: !!pd.ok, t: pv.ts });
+      if (strip.length > 96) strip.shift();
+      renderStrip();
+    }
+
+    /* 站点 */
+    renderSites(s.sites || []);
+    const extras = s.extras || [];
+    $("#extras").innerHTML = extras.length
+      ? `<span class="ex-lbl">其他</span>` + extras.map(e =>
+          `<button data-h="${esc(e.label)}" title="点击加入监测：${esc(e.label)}">＋ ${esc(e.label)}`
+          + ` <b>${fmtRate(e.down)[0]}${fmtRate(e.down)[1]}</b></button>`).join("")
+      : "";
+
+    /* 页脚 */
+    const nic = iface.kind === "wlan" ? `WLAN ${iface.ssid || ""}` : (iface.name || "网卡");
+    let left = `${nic} · ${iface.ip || "?"}`;
+    if (iface.kind === "wlan" && iface.band) {
+      left += ` · ${iface.band} ${iface.channel ? "ch" + iface.channel : ""} · 信号 ${iface.signal || "?"}%`
+        + (iface.rx ? ` · ${iface.rx}/${iface.tx} Mbps` : "");
+    } else if (iface.gateway) {
+      left += ` · 网关 ${iface.gateway}`;
+    }
+    if (route.dual) left += ` · 直连走 ${rd.name || "?"}${rd.ip ? " " + rd.ip : ""}`;
+    $("#footLeft").textContent = left;
+    $("#footRight").textContent = `控制器 ${tn.controller || ""} · ${s.ok ? "在线" : "离线"} · ${hhmmss(s.ts || Date.now() / 1000)}`;
+  }
+
+  function shortServer(s) {
+    if (!s) return "";
+    const head = s.split(".")[0];
+    return head.length > 17 ? head.slice(0, 16) + "…" : head;
+  }
+
+  function setProbe(pillSel, resSel, p, kind) {
+    const pill = $(pillSel), res = $(resSel);
+    if (!p || !p.ts) { pill.className = "pill idle"; pill.textContent = "—"; res.textContent = "—"; return; }
+    const ok = !!p.ok;
+    pill.className = "pill " + (ok ? "ok" : "bad");
+    pill.textContent = ok ? (p.status || 200) : (p.err || "失败");
+    res.textContent = fmtMs(p.ms);
+  }
+
+  /* ── 监测域名增删 ── */
+  let toastEl = null, toastTimer = 0;
+  function toast(msg) {
+    if (!toastEl) {
+      toastEl = document.createElement("div");
+      toastEl.id = "toast";
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = msg;
+    toastEl.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("on"), 2000);
+  }
+
+  async function siteAction(action, domain) {
+    try {
+      const r = await fetch("/api/sites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, domain })
+      });
+      const j = await r.json();
+      toast(j.msg || (j.ok ? "已更新" : "失败"));
+      pull();
+      return j;
+    } catch (e) {
+      toast("没连上本地服务");
+    }
+  }
+
+  const siteForm = $("#siteForm"), siteInput = $("#siteInput");
+  $("#addSiteBtn").onclick = () => {
+    siteForm.hidden = !siteForm.hidden;
+    if (!siteForm.hidden) siteInput.focus();
+  };
+  siteForm.onsubmit = async ev => {
+    ev.preventDefault();
+    const v = siteInput.value.trim();
+    if (!v) return;
+    siteInput.value = "";
+    await siteAction("add", v);
+    siteInput.focus();
+  };
+  siteInput.onkeydown = ev => {
+    if (ev.key === "Escape") { siteForm.hidden = true; siteInput.blur(); }
+  };
+  $("#extras").onclick = ev => {
+    const b = ev.target.closest("button[data-h]");
+    if (b) siteAction("add", b.dataset.h);
+  };
+
+  /* ── 时钟 ── */
+  let boot = 0;
+  function tickClock() {
+    const d = new Date();
+    $("#clock").textContent = d.toLocaleTimeString("zh-CN", { hour12: false });
+    if (boot) {
+      const s = Math.max(0, Math.round((Date.now() - boot) / 1000));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+      $("#uptime").textContent = h ? `已运行 ${h}h${String(m).padStart(2, "0")}m` : `已运行 ${m}m`;
+    }
+  }
+  setInterval(tickClock, 1000);
+  tickClock();
+
+  /* ── 数据流 ── */
+  function apply(s) {
+    if (!s || !Object.keys(s).length) return;
+    if (!boot && s.boot) boot = s.boot * 1000;
+    render(s);
+  }
+
+  fetch("/api/state").then(r => r.json()).then(apply).catch(() => {});
+
+  // 默认走 SSE；?poll=1 退化为 1s 轮询（SSE 被挡、或只想截图时用）
+  const POLL = new URLSearchParams(location.search).has("poll");
+  const pull = () => fetch("/api/state").then(r => r.json()).then(apply).catch(() => {});
+
+  let es = null, retry = 0;
+  function connect() {
+    es = new EventSource("/api/stream");
+    es.onmessage = e => { retry = 0; apply(JSON.parse(e.data)); };
+    es.onerror = () => {
+      es.close();
+      retry = Math.min(retry + 1, 6);
+      setTimeout(connect, 500 * retry + 500);
+    };
+  }
+  if (POLL) { pull(); setInterval(pull, 1000); }
+  else connect();
+})();
+</script>
+</body>
+</html>

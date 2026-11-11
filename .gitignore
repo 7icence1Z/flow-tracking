@@ -1,0 +1,9 @@
+﻿# 运行时产物
+state.json
+*.log
+__pycache__/
+__pycache__/**
+# 启动器用的独立浏览器 profile
+.edge-profile/
+# 开发期抓图与临时脚本
+tools/

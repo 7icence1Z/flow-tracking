@@ -1,0 +1,11 @@
+{
+  "port": 7717,
+  "controller": "127.0.0.1:7892",
+  "mixed_port": "127.0.0.1:7890",
+  "sites": [
+    "chatgpt.com",
+    "openai.com"
+  ],
+  "probe_interval": 10,
+  "probe_target": "https://chatgpt.com/"
+}
