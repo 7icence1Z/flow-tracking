@@ -16,6 +16,8 @@ FLOW — 本机流量出口监视器（只读）
 from __future__ import annotations
 
 import ctypes
+
+import providers
 import json
 import os
 import re
@@ -55,7 +57,8 @@ def _load_config() -> dict:
 
 CFG = _load_config()
 PORT = int(CFG["port"])
-CTRL = str(CFG["controller"])
+CTRL = str(CFG.get("controller", ""))
+DISCO = providers.Registry(CTRL)          # 自动发现：不绑死某一家客户端
 MIXED = str(CFG["mixed_port"])
 SITES = [s.strip().lower() for s in CFG["sites"] if s.strip()]
 PROBE_EVERY = max(5, int(CFG.get("probe_interval", 10)))
@@ -65,6 +68,7 @@ CONTROL_HOST = CONTROL_URL.split("//", 1)[-1].split("/", 1)[0]
 STATE_FILE = os.path.join(BASE, "state.json")
 CFG_PATH = os.path.join(BASE, "config.json")
 MAX_EXTRA_ROWS = 4
+HIST_MAX = 120
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))+$")
 
 
@@ -117,7 +121,13 @@ def log(*a):
 
 # ---------------------------------------------------------------- 基础
 def api(path: str, timeout: float = 2.5):
-    req = Request(f"http://{CTRL}{path}", headers={"Accept": "application/json"})
+    c = DISCO.client
+    host = (c.api if c else "") or CTRL
+    if not host:
+        raise RuntimeError("未发现代理控制器")
+    req = Request(f"http://{host}{path}", headers={"Accept": "application/json"})
+    if c and c.secret:
+        req.add_header("Authorization", f"Bearer {c.secret}")
     with DIRECT.open(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
@@ -228,6 +238,8 @@ class NetInfo:
         self.iface: dict = {"kind": "unknown"}
         self.node: dict = {}
         self.mihomo: dict = {"pid": 0, "config": ""}
+        self.client = None
+        self.vpn_exit_ip = ""
         self._last_proc = 0.0
         self.route: dict = {}
         self.direct_dst_ip = ""
@@ -276,21 +288,10 @@ class NetInfo:
             s.close()
 
     def _proc(self):
-        now = time.time()
-        pid = self.mihomo.get("pid") or 0
-        if pid and pid_alive(pid) and now - self._last_proc < 120:
-            return
-        self._last_proc = now
-        ps = ("$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*mihomo*' } | "
-              "Select-Object -First 1; if ($p) { [string]$p.ProcessId + '|' + $p.CommandLine }")
-        out = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], timeout=15).strip()
-        if "|" not in out:
-            self.mihomo = {"pid": 0, "config": self.mihomo.get("config", "")}
-            return
-        pid, _, cmd = out.partition("|")
-        m = re.search(r'-f\s+("[^"]+"|\S+)', cmd)
-        config = m.group(1).strip('"') if m else ""
-        self.mihomo = {"pid": int(pid.strip() or 0), "config": config}
+        """客户端识别全部交给 providers：换软件、换端口、重启订阅都能自己跟上"""
+        self.client = DISCO.tick()
+        c = self.client
+        self.mihomo = {"pid": c.pid, "config": c.config, "mode": c.mode}
 
     @staticmethod
     def _parse_proxies(text: str) -> dict:
@@ -334,15 +335,16 @@ class NetInfo:
         return out
 
     def _node(self):
-        conf = self.mihomo.get("config") or ""
-        if not conf or not os.path.exists(conf):
+        c = self.client
+        proxies = dict(c.proxies) if (c and c.proxies) else {}
+        if not proxies:
+            conf = self.mihomo.get("config") or ""
+            if conf and os.path.exists(conf):
+                proxies = self._parse_proxies(providers._read(conf))
+        if not proxies:
+            if c and not c.api:
+                self.node = {}          # 既没有控制器也没有配置：宁可空着也不猜
             return
-        try:
-            with open(conf, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except Exception:
-            return
-        proxies = self._parse_proxies(text)
         self.proxies = proxies
         # 真正在用的节点：先问控制器选中的是谁（global 模式下 GLOBAL 组的 now 就是它），
         # 再退到连接链里出现次数最多的那个配置名
@@ -350,7 +352,7 @@ class NetInfo:
         try:
             groups = (api("/proxies") or {}).get("proxies") or {}
             g = groups.get("GLOBAL") or {}
-            if self.mihomo.get("mode") == "global" and g.get("now") in proxies:
+            if (self.mihomo.get("mode") or "").lower() == "global" and g.get("now") in proxies:
                 want = g["now"]
             else:
                 for gg in groups.values():
@@ -358,6 +360,10 @@ class NetInfo:
                         counts[gg["now"]] = counts.get(gg["now"], 0) + 1
         except Exception:
             pass
+        if not want and getattr(self, "vpn_exit_ip", ""):
+            hit = DISCO.match_exit(self.vpn_exit_ip)
+            if hit:
+                want = hit["name"]
         if not want:
             try:
                 for c in api("/connections").get("connections") or []:
@@ -492,6 +498,8 @@ class Collector:
         self.ex_meta: dict[str, dict] = {}
         self.last_via: dict[str, str] = {}
         self.tot = [0.0, 0.0]
+        self.hist_total: list[list[int]] = []
+        self.hist_sites: dict[str, list[list[int]]] = {}
         self.cum: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
         self.egress = {"vpn_ip": "", "vpn_geo": "", "vpn_ts": 0, "vpn_err": "",
                        "direct_ip": "", "direct_geo": "", "direct_ts": 0, "direct_err": ""}
@@ -670,6 +678,16 @@ class Collector:
         raw_d, raw_u = total_down / dt, total_up / dt
         self.tot[0] = self.tot[0] * 0.45 + raw_d * 0.55
         self.tot[1] = self.tot[1] * 0.45 + raw_u * 0.55
+        self.hist_total.append([round(self.tot[0]), round(self.tot[1])])
+        if len(self.hist_total) > HIST_MAX:
+            del self.hist_total[:-HIST_MAX]
+        for r in rows:
+            if not r["watched"]:
+                continue
+            q = self.hist_sites.setdefault(r["key"], [])
+            q.append([r["down"], r["up"]])
+            if len(q) > HIST_MAX:
+                del q[:-HIST_MAX]
         self._publish(ok=True, conns=len(conns), total=(self.tot[0], self.tot[1]),
                       rows=rows, raw=data)
 
@@ -680,12 +698,23 @@ class Collector:
         mixed_no = MIXED.split(":")[-1]
         sp_on = self.sysproxy.get("enable") == 1
 
+        cli = DISCO.client
         if not ok:
-            active, reason = "down", "本地控制器没有响应，无法读取连接表"
+            # 没有 Clash 系控制器：别的客户端（v2rayN / WireGuard / 深信服…）不暴露连接表，
+            # 这时只能说清楚"能看见什么"，不能假装知道逐条流量
+            if sp_on:
+                active = "vpn"
+                reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or MIXED}，"
+                          f"但没找到可读的连接控制器，逐条明细不可见")
+            elif cli.name and cli.kind not in ("clash", "singbox", "none"):
+                active = "mixed"
+                reason = f"检测到 {cli.name}，它不暴露连接表；下面只有网卡与出口层面的数据"
+            else:
+                active, reason = "down", "本地控制器没有响应，无法读取连接表"
         elif sp_on:
             active = "vpn"
             reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or MIXED}"
-                      f"（mihomo {mode or '?'} 模式），代理感知型应用全部经隧道转发")
+                      f"（{cli.core or '内核'} {mode or '?'} 模式），代理感知型应用全部经隧道转发")
         elif tun:
             active, reason = "vpn", "系统代理未开，但 TUN 已接管全部流量"
         elif mode == "global":
@@ -702,9 +731,10 @@ class Collector:
             "error": self.error,
             "path": {"active": active, "reason": reason, "sysproxy": self.sysproxy},
             "tunnel": {"up": ok, "mode": mode, "tun": tun, "mixed": MIXED,
-                       "controller": CTRL, "version": self.ver, "conns": conns,
+                       "controller": DISCO.client.api or CTRL, "version": self.ver, "conns": conns,
                        "download_total": (raw or {}).get("downloadTotal", 0),
                        "upload_total": (raw or {}).get("uploadTotal", 0)},
+            "client": DISCO.client.pack(),
             "iface": self.net.iface,
             "route": self.net.route,
             "node": self.net.node,
@@ -712,6 +742,8 @@ class Collector:
             "egress": self.egress,
             "probes": self.probes,
             "sites": sites,
+            "hist": {"total": list(self.hist_total),
+                     "sites": {k: list(v) for k, v in self.hist_sites.items()}},
             "watched": list(SITES),
             "extras": extras,
             "total": {"down": round(total[0]), "up": round(total[1])},
@@ -742,6 +774,7 @@ class Collector:
                 if r2["ok"]:
                     ip = r2["body"].strip()
             self.egress["vpn_ip"] = ip
+            self.net.vpn_exit_ip = ip
             self.egress["vpn_geo"] = geo
             self.egress["vpn_err"] = "" if ip else (r.get("err") or "失败")
             self.egress["vpn_ts"] = now
@@ -881,7 +914,7 @@ def main():
 
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.daemon_threads = True
-    log(f"FLOW ▶ http://127.0.0.1:{PORT}/   控制器 {CTRL}   站点 {', '.join(SITES)}")
+    log(f"FLOW ▶ http://127.0.0.1:{PORT}/   站点 {', '.join(SITES)}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

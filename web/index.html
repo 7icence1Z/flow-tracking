@@ -7,166 +7,151 @@
 <title>FLOW · 流量出口</title>
 <style>
 :root{
-  --bg:#07090c; --panel:#0d1116; --line:#1b222c; --line-2:#2b3543;
-  --text:#e9edf4; --dim:#8e99ab; --dim-2:#5c6678;
-  --vpn:#7b8fff; --direct:#3ddc97; --dn:#5cc8ff; --up:#ffb35c;
-  --danger:#ff6b6b; --warn:#f5c451; --ok:#3ddc97;
+  color-scheme:dark;
+  --bg:#0b0c0e; --panel:#111417; --panel-2:#181c21;
+  --line:#1f242b; --line-2:#2e353f;
+  --text:#dfe3e8; --dim:#9aa3af; --dim-2:#77808d;
+  --accent:#d99a4e; --accent-2:#5d4a30; --bad:#c96a5f;
+  --vpn:#d99a4e; --dir:#5fada5; --ok:#5fada5; --ok-2:#3d6266;
+  --dn:#dfe3e8; --up:#7d949c;
   --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,"Liberation Mono",monospace;
   --ui:system-ui,-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif;
-  --r:10px;
+  --r:5px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{
-  background:
-    radial-gradient(1100px 520px at 12% -12%, #17222f 0%, transparent 62%),
-    radial-gradient(800px 460px at 102% -4%, #131d27 0%, transparent 58%),
-    var(--bg);
-  color:var(--text);
+  background:var(--bg);color:var(--text);
   font:12.5px/1.5 var(--ui);
   -webkit-font-smoothing:antialiased;
   padding:8px;
 }
 .app{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:6px;max-width:940px;margin:0 auto}
-.card{
-  background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,0) 60%),var(--panel);
-  border:1px solid var(--line);border-radius:var(--r);
-  padding:8px 11px;min-width:0;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 18px 40px -32px #000;
-}
-.head{grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:1px 1px 0}
-.brand{display:flex;align-items:baseline;gap:9px}
-.brand b{font-size:12.5px;letter-spacing:.24em;font-weight:650}
-.brand small{color:var(--dim-2);font-size:10px;letter-spacing:.06em}
-.verdict{
-  display:inline-flex;align-items:center;gap:7px;padding:4px 11px 4px 9px;border-radius:999px;
-  border:1px solid var(--line-2);background:rgba(255,255,255,.03);
-  font-weight:600;letter-spacing:.01em;white-space:nowrap;
-}
-.verdict .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
-.verdict[data-s="vpn"]{color:#c8d2ff;border-color:rgba(123,143,255,.42);background:rgba(123,143,255,.13)}
-.verdict[data-s="vpn"] .dot{box-shadow:0 0 0 4px rgba(123,143,255,.14)}
-.verdict[data-s="direct"]{color:#b9f7da;border-color:rgba(61,220,151,.4);background:rgba(61,220,151,.12)}
-.verdict[data-s="direct"] .dot{box-shadow:0 0 0 4px rgba(61,220,151,.13)}
-.verdict[data-s="mixed"]{color:#ffe3b3;border-color:rgba(245,196,81,.42);background:rgba(245,196,81,.11)}
-.verdict[data-s="down"]{color:#ffd2d2;border-color:rgba(255,107,107,.45);background:rgba(255,107,107,.13)}
-.verdict small{font-weight:400;color:var(--dim);letter-spacing:0;font-size:11px}
-.grow{flex:1}
-.clock{display:flex;align-items:baseline;gap:10px;font-family:var(--mono);font-size:11px;color:var(--dim)}
-.clock b{color:var(--text);font-weight:500;font-size:12px;font-variant-numeric:tabular-nums}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:8px 11px;min-width:0}
 
-h2{margin:0;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim-2);font-weight:600}
-.card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
-.card-head .note{color:var(--dim);font-size:11.5px}
+/* ── 头部 ───────────────────────────────── */
+.head{grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:2px 2px 0}
+.brand{display:flex;align-items:baseline;gap:8px;margin:0;font-weight:400}
+.brand b{font-size:12.5px;letter-spacing:.16em;font-weight:650;color:#f0f2f5}
+.brand small{color:var(--dim-2);font-size:10.5px}
+.verdict{display:inline-flex;align-items:center;gap:7px;padding:0;border:0;background:none;
+  font-size:13px;font-weight:600;color:var(--text);white-space:nowrap}
+.verdict .dot{width:6px;height:6px;border-radius:50%;background:var(--dim-2);flex:none}
+.verdict[data-s="vpn"] .dot,.verdict[data-s="mixed"] .dot{background:var(--accent)}
+.verdict[data-s="vpn"]{color:#e4c69b}
+.verdict[data-s="mixed"]{color:#d8c3a3}
+.verdict[data-s="direct"]{color:#bdd8d4}
+.verdict[data-s="down"]{color:#e0b0a9}
+.verdict[data-s="direct"] .dot{background:var(--ok)}
+.verdict[data-s="down"] .dot{background:var(--bad)}
+.verdict small{font-weight:400;color:var(--dim);font-size:11px;letter-spacing:0}
+.grow{flex:1}
+.clock{display:flex;align-items:baseline;gap:9px;font-family:var(--mono);font-size:10.5px;color:var(--dim-2)}
+.clock b{color:var(--dim);font-weight:500;font-size:11.5px;font-variant-numeric:tabular-nums}
+
+h2{margin:0;font-size:11.5px;font-weight:500;color:var(--dim);letter-spacing:.02em}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px}
+.card-head .note{color:var(--dim-2);font-size:10.5px;font-family:var(--mono)}
 
 /* ── 路径 ───────────────────────────────── */
 .route{grid-column:1/-1}
-.lanes{display:grid;gap:7px}
+.lanes{display:grid;gap:0}
 .lane{
-  border:1px solid var(--line);border-radius:9px;padding:6px 9px 7px;
-  background:rgba(255,255,255,.014);transition:opacity .25s,border-color .25s;
+  border:0;border-top:1px solid var(--line);border-left:2px solid #20262e;
+  border-radius:0;padding:5px 0 6px 9px;background:none;
 }
-.lane[data-active="false"]{opacity:.5}
-.lane[data-active="true"][data-kind="vpn"]{border-color:rgba(123,143,255,.4);background:linear-gradient(180deg,rgba(123,143,255,.075),rgba(123,143,255,.012))}
-.lane[data-active="true"][data-kind="direct"]{border-color:rgba(61,220,151,.34);background:linear-gradient(180deg,rgba(61,220,151,.06),rgba(61,220,151,.01))}
-.lane-head{display:flex;align-items:center;gap:7px;margin-bottom:6px;flex-wrap:wrap}
-.badge{
-  font-size:10px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;
-  padding:2.5px 7px;border-radius:5px;border:1px solid;
-}
-.badge.vpn{color:#c8d2ff;border-color:rgba(123,143,255,.45);background:rgba(123,143,255,.13)}
-.badge.direct{color:#b9f7da;border-color:rgba(61,220,151,.42);background:rgba(61,220,151,.11)}
-.lane-title{font-size:11.5px;font-weight:600;letter-spacing:.02em}
-.lane-meta{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
-.lane-meta .on{color:var(--ok)}
-.lane-meta .off{color:var(--danger)}
+.lane:first-child{border-top:0}
+.lane[data-active="false"]{opacity:.55}
+.lane[data-active="true"][data-kind="vpn"]{border-left-color:var(--accent)}
+.lane[data-active="true"][data-kind="direct"]{border-left-color:var(--dir)}
+.lane[data-active="true"][data-kind="vpn"]{background:rgba(217,154,78,.035)}
+.lane[data-active="true"][data-kind="direct"]{background:rgba(87,160,154,.035)}
+.lane[data-active="true"][data-kind="vpn"] .lane-title{color:#dcc3a1}
+.lane[data-active="true"][data-kind="direct"] .lane-title{color:#b3cdc8}
+.lane-head{display:flex;align-items:center;gap:8px;margin-bottom:5px;flex-wrap:wrap}
+.badge{font-size:10px;letter-spacing:.06em;font-weight:600;color:var(--dim);border:0;padding:0}
+.badge::before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:var(--dim-2);margin-right:5px;vertical-align:1px}
+.badge.vpn::before{background:var(--accent-2)}
+.badge.direct::before{background:var(--ok-2)}
+.lane[data-active="true"] .badge.vpn::before{background:var(--accent)}
+.lane[data-active="true"] .badge.direct::before{background:var(--ok)}
+.lane-title{font-size:11.5px;font-weight:500;letter-spacing:.01em;color:#c6ccd4}
+.lane-meta{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--dim-2)}
+.lane-meta .on{color:var(--dim)}
+.lane-meta .off{color:var(--bad)}
 
 .chain{display:flex;align-items:center;margin:0;padding:0;list-style:none;gap:0}
-.node{
-  min-width:0;flex:1 1 0;padding:4px 9px;border-radius:6px;
-  background:#121821;border:1px solid var(--line);position:relative;z-index:1;
-}
-.node .k{display:block;font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim-2);margin-bottom:1px}
-.node .v{display:block;font-family:var(--mono);font-size:10.5px;color:#dbe2ec;
+.node{min-width:0;flex:1 1 0;padding:0 4px;border-radius:0;background:none;border:0}
+.node .k{display:block;font-size:9px;letter-spacing:.02em;color:var(--dim-2);margin-bottom:1px}
+.node .v{display:block;font-family:var(--mono);font-size:10.5px;color:#ccd2d9;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.node .v.ip{color:#fff}
-.link{list-style:none;flex:0 0 20px;height:1px;background:var(--line-2);position:relative;margin:0 6px}
+.node .v.ip{color:var(--text)}
+#vpnNode{max-width:196px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.link{list-style:none;flex:0 0 18px;height:1px;background:var(--line-2);position:relative;margin:0 5px}
 .link::after{
-  content:"";position:absolute;right:-1px;top:-2.5px;width:5px;height:5px;
-  border-right:1.2px solid var(--line-2);border-top:1.2px solid var(--line-2);
+  content:"";position:absolute;right:0;top:-2px;width:4px;height:4px;
+  border-right:1px solid var(--line-2);border-top:1px solid var(--line-2);
   transform:rotate(45deg);
 }
-.lane[data-active="true"][data-kind="vpn"] .link{
-  background:repeating-linear-gradient(90deg,rgba(123,143,255,.85) 0 5px,transparent 5px 11px);
-  background-size:11px 1px;
-}
-.lane[data-active="true"][data-kind="direct"] .link{
-  background:repeating-linear-gradient(90deg,rgba(61,220,151,.8) 0 5px,transparent 5px 11px);
-  background-size:11px 1px;
-}
-@media (prefers-reduced-motion:no-preference){
-  .lane[data-active="true"] .link{animation:flow 1.3s linear infinite}
-  @keyframes flow{to{background-position:11px 0}}
-  .verdict[data-s="vpn"] .dot{animation:pulse 2.6s ease-in-out infinite}
-  @keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(123,143,255,.10)}50%{box-shadow:0 0 0 6px rgba(123,143,255,.05)}}
-}
-.reason{margin-top:7px;font-size:10.5px;color:var(--dim);display:flex;gap:7px;align-items:flex-start}
-.reason svg{flex:none;margin-top:2px;opacity:.6}
+.lane[data-active="true"][data-kind="vpn"] .link{background:var(--accent-2)}
+.lane[data-active="true"][data-kind="vpn"] .link::after{border-color:var(--accent-2)}
+.lane[data-active="true"][data-kind="direct"] .link{background:var(--ok-2)}
+.lane[data-active="true"][data-kind="direct"] .link::after{border-color:var(--ok-2)}
 
 /* ── 速率 ───────────────────────────────── */
 .throughput{grid-column:span 7}
 .probes{grid-column:span 5}
 .rates{display:flex;gap:18px;align-items:flex-end;margin-bottom:2px}
 .rate{min-width:0}
-.rate .cap{display:flex;align-items:center;gap:5px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim-2)}
-.rate .val{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.1}
-.rate.dn .val{font-size:19px;color:var(--dn)}
+.rate .cap{font-size:9.5px;letter-spacing:.02em;color:var(--dim-2)}
+.rate .val{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em;line-height:1.15}
+.rate.dn .val{font-size:19px;color:var(--text)}
 .rate.up .val{font-size:14px;color:var(--up)}
-.rate .unit{font-size:11px;color:var(--dim);margin-left:5px;letter-spacing:0}
+.rate .unit{font-size:10.5px;color:var(--dim-2);margin-left:4px;letter-spacing:0}
 .chart{position:relative;height:40px;margin:3px 0 2px}
-.chart .scale{position:absolute;right:2px;top:-4px;font:10px/1 var(--mono);color:var(--dim-2);letter-spacing:.02em}
+.chart .scale{position:absolute;right:2px;top:-3px;font:9.5px/1 var(--mono);color:var(--dim-2)}
 .sites-empty{padding:10px 2px 4px;font-size:10.5px;color:var(--dim-2)}
 .chart svg{display:block;width:100%;height:100%}
-.totals{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);font-size:10px;color:var(--dim);
+.totals{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);font-size:10.5px;color:var(--dim-2);
   border-top:1px solid var(--line);padding-top:5px;margin-top:2px}
-.totals b{color:#c6cfdc;font-weight:500}
+.totals b{color:var(--dim);font-weight:400}
 
 /* ── 探测 ───────────────────────────────── */
-.prow{display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.035);font-size:10.5px}
+.prow{display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid #161a20;font-size:10.5px}
 .prow:last-of-type{border-bottom:0}
 .prow .nm{color:var(--dim);min-width:62px}
-.prow .res{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums}
-.pill{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid;letter-spacing:.05em}
-.pill.ok{color:#b9f7da;border-color:rgba(61,220,151,.4);background:rgba(61,220,151,.1)}
-.pill.bad{color:#ffd2d2;border-color:rgba(255,107,107,.4);background:rgba(255,107,107,.1)}
-.pill.idle{color:var(--dim);border-color:var(--line-2);background:transparent}
+.prow .res{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--dim)}
+.pill{font-family:var(--mono);font-size:10.5px;letter-spacing:.02em;color:var(--dim-2);border:0;padding:0;border-radius:0}
+.pill.ok{color:var(--ok)}
+.pill.bad{color:var(--bad)}
+.pill.idle{color:var(--dim-2)}
 .strip{margin-top:6px}
-.strip .lbl{display:flex;justify-content:space-between;font-size:10px;letter-spacing:.1em;
-  text-transform:uppercase;color:var(--dim-2);margin-bottom:3px}
+.strip .lbl{display:flex;justify-content:space-between;font-size:9.5px;letter-spacing:.02em;
+  color:var(--dim-2);margin-bottom:3px}
 .strip svg{display:block;width:100%;height:12px}
 
 /* ── 站点 ───────────────────────────────── */
 .sites{grid-column:1/-1}
 .site{display:grid;grid-template-columns:150px minmax(0,1fr) 148px;
-  align-items:center;gap:10px;padding:4px 0;border-top:1px solid rgba(255,255,255,.04)}
+  align-items:center;gap:10px;padding:4px 0;border-top:1px solid #161a20}
 .site:first-child{border-top:0}
-.site-id{min-width:0;display:flex;align-items:center;gap:8px}
-.site-name{font-family:var(--mono);font-size:11.5px;color:#e3e9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.site-id{min-width:0;display:flex;align-items:center;gap:7px}
+.site-name{font-family:var(--mono);font-size:11.5px;color:#d3d8df;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .site-sub{display:none}
-.tag{font-size:9px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;
-  padding:1.5px 5px;border-radius:4px;border:1px solid;flex:none}
-.tag[data-via="vpn"]{color:#c8d2ff;border-color:rgba(123,143,255,.4);background:rgba(123,143,255,.12)}
-.tag[data-via="direct"]{color:#b9f7da;border-color:rgba(61,220,151,.4);background:rgba(61,220,151,.1)}
-.tag[data-via="idle"]{color:var(--dim-2);border-color:var(--line);background:transparent}
+.tag{font-size:9.5px;letter-spacing:.04em;font-weight:500;border:0;padding:0;flex:none;color:var(--dim-2)}
+.tag[data-via="vpn"]{color:#c08b46}
+.tag[data-via="direct"]{color:#4f8d88}
+.tag[data-via="idle"]{color:var(--dim-2)}
 .site-spark svg{display:block;width:100%;height:18px;overflow:visible}
-.site-nums .u{font-size:10px;color:var(--dim-2);margin-left:2px}
 .site-nums{display:flex;gap:10px;font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums;
   white-space:nowrap;justify-content:flex-end}
 .site-nums .n{display:inline-flex;align-items:baseline;gap:3px}
-.site-nums .n.dn{color:var(--dn)}
+.site-nums .n.dn{color:var(--text)}
 .site-nums .n.up{color:var(--up)}
-.site-nums i{font-style:normal;font-size:10px;opacity:.75}
+.site-nums i{font-style:normal;font-size:9.5px;color:var(--dim-2)}
 .site-nums .n.idle{color:var(--dim-2)}
+.site-nums .u{font-size:9.5px;color:var(--dim-2);margin-left:1px}
 .extras{margin-top:6px;border-top:1px solid var(--line);padding-top:6px;
   font-family:var(--mono);font-size:10.5px;color:var(--dim-2);display:flex;flex-wrap:wrap;gap:5px 14px}
 .extras:empty{display:none}
@@ -175,50 +160,54 @@ h2{margin:0;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color
 footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
   font-family:var(--mono);font-size:10px;color:var(--dim-2);padding:1px 3px 2px}
 
-@media (max-width:760px){
-  .throughput,.probes{grid-column:1/-1}
-}
-@media (max-width:520px){
-  body{padding:10px}
-  .rate.dn .val{font-size:26px}
-  .site{grid-template-columns:minmax(0,1fr) auto;gap:6px 10px}
-  .site-spark{grid-column:1/-1;grid-row:2}
-  .node{flex:none}
-  .node .v{font-size:10.5px}
-  .lane-meta{margin-left:0;flex-basis:100%;order:9}
-  .rates{gap:14px}
-  .chain{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .chain .link{display:none}
-}
 /* ── 站点增删 ──────────────────────────── */
 .sites-ops{display:flex;align-items:center;gap:9px}
-.mini{font:inherit;font-size:10.5px;color:var(--dim);background:rgba(255,255,255,.04);
-  border:1px solid var(--line-2);border-radius:6px;padding:2px 8px;cursor:pointer;white-space:nowrap}
-.mini:hover{color:var(--text);border-color:#3d4a5c;background:rgba(255,255,255,.07)}
+.mini{font:inherit;font-size:10.5px;color:var(--dim);background:var(--panel-2);
+  border:1px solid var(--line-2);border-radius:3px;padding:2px 7px;cursor:pointer;white-space:nowrap}
+.mini:hover{color:var(--text);border-color:#3a434f}
 .site-form{margin:0 0 5px}
-.site-form input{width:100%;font:11.5px/1.4 var(--mono);color:var(--text);background:#0a0e13;
-  border:1px solid var(--line-2);border-radius:6px;padding:4px 8px;outline:none}
-.site-form input:focus{border-color:rgba(123,143,255,.6)}
-.site-del{opacity:0;transition:opacity .15s,color .15s;font:12px/1 var(--ui);color:var(--dim-2);
-  background:none;border:0;cursor:pointer;padding:0 1px;flex:none}
+.site-form input{width:100%;font:11.5px/1.4 var(--mono);color:var(--text);background:#0b0e12;
+  border:1px solid var(--line-2);border-radius:3px;padding:4px 8px}
+.site-form input:focus{border-color:#4a5464;outline:2px solid #3d4757;outline-offset:0}
+:where(button,input):focus-visible{outline:2px solid #55627a;outline-offset:1px}
+.site-del{opacity:0;font:11.5px/1 var(--ui);color:var(--dim-2);background:none;border:0;
+  cursor:pointer;padding:0 1px;flex:none}
 .site:hover .site-del,.site-del:focus-visible{opacity:1}
-.site-del:hover{color:var(--danger)}
+.site-del:hover{color:var(--bad)}
 .extras button{font-family:var(--mono);font-size:10.5px;color:var(--dim-2);background:none;border:0;
   padding:0;cursor:pointer;display:inline-flex;align-items:baseline;gap:4px}
 .extras button:hover{color:var(--text)}
 .extras button b{color:var(--dim);font-weight:400}
-.extras .ex-lbl{color:var(--dim-2);letter-spacing:.08em}
-#toast{position:fixed;left:50%;bottom:14px;transform:translateX(-50%) translateY(6px);opacity:0;
-  pointer-events:none;background:rgba(20,26,34,.97);border:1px solid var(--line-2);border-radius:7px;
-  padding:5px 11px;font-size:11px;color:var(--text);transition:opacity .2s,transform .2s;z-index:9}
-#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.extras .ex-lbl{color:#3f4753}
+#toast{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);opacity:0;
+  pointer-events:none;background:#161a20;border:1px solid var(--line-2);border-radius:3px;
+  padding:5px 11px;font-size:11px;color:var(--text);transition:opacity .18s;z-index:9}
+#toast.on{opacity:1}
+
+@media (max-width:760px){
+  .throughput,.probes{grid-column:1/-1}
+}
+@media (max-width:520px){
+  body{padding:6px}
+  .rate.dn .val{font-size:17px}
+  .site{grid-template-columns:minmax(0,1fr) auto;gap:3px 10px}
+  .site-spark{grid-column:1/-1;grid-row:2}
+  .node{flex:none}
+  .lane-meta{margin-left:0;flex-basis:100%;order:9}
+  .rates{gap:14px}
+  .chain{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .chain .link{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+}
 </style>
 </head>
 <body>
 <svg width="0" height="0" aria-hidden="true" style="position:absolute;pointer-events:none">
   <defs>
     <linearGradient id="gSite" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" style="stop-color:var(--dn);stop-opacity:.18"/>
+      <stop offset="0%" style="stop-color:var(--dn);stop-opacity:.20"/>
       <stop offset="100%" style="stop-color:var(--dn);stop-opacity:0"/>
     </linearGradient>
   </defs>
@@ -226,7 +215,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
 <main class="app">
 
   <div class="head">
-    <div class="brand"><b>FLOW</b><small>流量出口监视</small></div>
+    <h1 class="brand"><b>FLOW</b><small>流量出口监视</small></h1>
     <div class="verdict" id="verdict" data-s="idle" aria-live="polite">
       <span class="dot"></span>
       <span id="verdictText">连接中…</span>
@@ -288,8 +277,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       </linearGradient></defs>
       <line x1="0" y1="20" x2="100" y2="20" style="stroke:var(--line)" stroke-width="1" stroke-dasharray="2 4" vector-effect="non-scaling-stroke"/>
       <path id="dnArea" fill="url(#gDn)" d=""/>
-      <path id="dnLine" fill="none" style="stroke:var(--dn)" stroke-width="1.4" stroke-linejoin="round" d=""/>
-      <path id="upLine" fill="none" style="stroke:var(--up)" stroke-width="1" stroke-opacity=".85" stroke-linejoin="round" d=""/>
+      <path id="dnLine" fill="none" style="stroke:var(--dn)" stroke-width="1.2" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>
+      <path id="upLine" fill="none" style="stroke:var(--up)" stroke-width="1" stroke-opacity=".85" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>
     </svg></div>
     <div class="totals">
       <span>本次 ↓ <b id="dnTotal">0 B</b></span>
@@ -314,11 +303,12 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       <h2>站点</h2>
       <div class="sites-ops">
         <span class="note">按域名归并 · 1s 采样</span>
-        <button class="mini" id="addSiteBtn" title="添加要盯的域名">＋ 域名</button>
+        <button class="mini" id="addSiteBtn" type="button" title="添加要盯的域名">＋ 域名</button>
       </div>
     </div>
     <form class="site-form" id="siteForm" hidden>
-      <input id="siteInput" placeholder="example.com · 回车添加，Esc 取消" autocomplete="off" spellcheck="false">
+      <input id="siteInput" name="domain" type="text" inputmode="url" aria-label="要监测的域名"
+             placeholder="example.com · 回车添加，Esc 取消" autocomplete="off" spellcheck="false">
     </form>
     <div id="sites"></div>
     <div class="extras" id="extras"></div>
@@ -365,10 +355,10 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     let d = "";
     for (let i = 0; i < n; i++) {
       const x = i * step;
-      const y = h - Math.min(1, vals[i] / max) * (h - 1.5) - 0.75;
+      const y = (h - 2) - Math.min(1, vals[i] / max) * (h - 2.5);
       d += (i ? "L" : "M") + x.toFixed(2) + " " + y.toFixed(2);
     }
-    if (close) d += `L${w} ${h}L0 ${h}Z`;
+    if (close) d += `L${w} ${h - 2}L0 ${h - 2}Z`;
     return d;
   }
 
@@ -410,7 +400,21 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     }
     svg.innerHTML = out;
     const ok = strip.filter(s => s.v).length;
-    $("#stripStat").textContent = strip.length ? `${ok}/${strip.length} 成功` : "采集中";
+    $("#stripStat").textContent = strip.length ? `${ok}/${strip.length} 成功` : "采集中…";
+  }
+
+  // 软件里的节点名常带 node_12_ 前缀和 "| CM CU" 后缀，链路里只留认得出的部分
+  function nodeLabel(n) {
+    return (n || "").replace(/^node_\d+_/, "").split("|")[0].trim() || n || "";
+  }
+
+  function ago(ts) {
+    const d = Date.now() / 1000 - ts;
+    if (!ts || d < 0) return "";
+    if (d < 60) return "刚刚";
+    if (d < 3600) return Math.floor(d / 60) + " 分钟前";
+    if (d < 86400) return Math.floor(d / 3600) + " 小时前";
+    return Math.floor(d / 86400) + " 天前";
   }
 
   /* ── 站点行 ── */
@@ -423,7 +427,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       <div class="site-id">
         <span class="site-name">${esc(key)}</span>
         <span class="tag" data-via="idle">—</span>
-        <button class="site-del" title="不再监测这个域名" aria-label="移除">×</button>
+        <button class="site-del" type="button" aria-label="移除这个域名" title="不再监测这个域名">×</button>
       </div>
       <div class="site-spark"><svg viewBox="0 0 100 30" preserveAspectRatio="none">
         <path class="f" fill="url(#gSite)" d=""/>
@@ -474,11 +478,15 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       const dser = q.map(p => p.d), user = q.map(p => p.u);
       const dmax = Math.max(...dser), umax = Math.max(...user);
       const hasD = dmax > 0, hasU = umax > max * 0.02;
-      r.f.setAttribute("d", hasD ? buildPath(dser, 100, 30, max, true) : "");
-      r.a.setAttribute("d", hasD ? buildPath(dser, 100, 30, max, false) : "");
-      r.b.setAttribute("d", hasU ? buildPath(user, 100, 30, max, false) : "");
+      r.f.setAttribute("d", hasD ? buildPath(dser, 100, 26, max, true) : "");
+      r.a.setAttribute("d", hasD ? buildPath(dser, 100, 26, max, false) : "");
+      r.b.setAttribute("d", hasU ? buildPath(user, 100, 26, max, false) : "");
 
       const via = s.via || "idle";
+      const hue = via === "vpn" ? "var(--vpn)" : via === "direct" ? "var(--dir)" : "var(--dim-2)";
+      r.a.style.stroke = hue;
+      r.f.style.fill = via === "vpn" ? "rgba(217,154,78,.11)"
+        : via === "direct" ? "rgba(95,173,165,.11)" : "rgba(223,227,232,.05)";
       r.tag.dataset.via = via;
       r.tag.textContent = via === "vpn" ? "VPN" : via === "direct" ? "直连" : "空闲";
       const [dn, dnu] = fmtRate(s.down);
@@ -511,7 +519,16 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   /* ── 主渲染 ── */
   function render(s) {
     const now = Date.now();
+    const cli = s.client || {};
     lastPing = now;
+
+    // 首次拿到快照时用服务端攒的历史打底，面板一打开就有曲线，而不是空等两分钟
+    if (!hist.seeded && s.hist) {
+      hist.seeded = true;
+      const toPairs = a => (a || []).slice(-HIST).map(x => ({ d: x[0], u: x[1] }));
+      hist.total = toPairs(s.hist.total);
+      for (const k in (s.hist.sites || {})) hist.vpnSites.set(k, toPairs(s.hist.sites[k]));
+    }
 
     /* 判定 */
     const p = s.path || {};
@@ -527,7 +544,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const label = { vpn: "走 VPN", direct: "直连", mixed: "部分走 VPN", down: "隧道异常" }[active] || "未知";
     $("#verdictText").textContent = label;
     $("#verdictSub").textContent = active === "vpn" && node.name
-      ? `${shortServer(node.server) || node.name} · ${eg.vpn_ip || "出口待测"}`
+      ? `${nodeLabel(node.name)} · ${eg.vpn_ip || "出口待测"}`
       : active === "mixed" ? "系统代理未开 · 仅显式代理的程序经隧道"
         : active === "direct" ? (eg.direct_ip || "") : "";
 
@@ -538,12 +555,17 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     lA.dataset.active = String(vpnLane);
     $("#vpnLocal").textContent = rv.ip || iface.ip || "—";
     $("#vpnNic").textContent = rv.ssid || rv.name || iface.ssid || iface.name || "—";
-    $("#vpnNode").textContent = node.server ? shortServer(node.server) + ":" + node.port : "—";
+    $("#vpnNode").textContent = node.name ? nodeLabel(node.name)
+      : (node.server ? shortServer(node.server) : "—");
+    $("#vpnNode").title = node.server ? `${node.name || ""} ${node.server}:${node.port}`.trim() : "";
     $("#vpnExit").textContent = eg.vpn_ip || "待测";
     const conns = (s.tunnel || {}).conns || 0;
+    const tn2 = s.tunnel || {};
+    const knobs = `${cli.mode || "?"} · TUN ${tn2.tun ? "开" : "关"}`;
+    const rtt = node.rtt == null ? "" : node.rtt < 0 ? " · 节点超时" : ` · ${node.rtt}ms`;
     $("#vpnMeta").innerHTML = vpnLane
-      ? `<span class="on">承载 ${conns} 条</span> · ${node.rtt != null ? (node.rtt < 0 ? "节点超时" : node.rtt + "ms") : ""}`
-      : `未承载流量${node.rtt >= 0 ? " · 节点 " + node.rtt + "ms" : ""}`;
+      ? `<span class="on">承载 ${conns} 条</span> · ${knobs}${rtt}`
+      : `未承载流量 · ${knobs}${rtt}`;
 
     /* 路径 B：直连 */
     const pd = probes.direct || {};
@@ -558,9 +580,12 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
           (probes.control || {}).ok ? fmtMs(probes.control.ms) : "不通"}`)
       : "探测中";
 
-    $("#modeNote").textContent = s.tunnel && s.tunnel.up
-      ? `mihomo ${s.tunnel.mode || "?"} · TUN ${s.tunnel.tun ? "开" : "关"} · ${s.tunnel.version || ""}`
-      : "mihomo 无响应";
+    const subU = cli.sub && cli.sub.updated ? ago(cli.sub.updated) : "";
+    $("#modeNote").textContent = cli.name
+      ? `${cli.name} · ${cli.core || "?"}${cli.version ? " " + cli.version : ""}`
+        + `${cli.nodes ? " · " + cli.nodes + " 个节点" : ""}`
+        + `${subU ? " · 订阅 " + subU + "更新" : ""}`
+      : "未检测到代理客户端";
     vd.title = p.reason || "";
 
     /* 吞吐 */
@@ -571,6 +596,12 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const [upv, upu] = fmtRate(t.up);
     $("#dnRate").textContent = dnv; $("#dnUnit").textContent = dnu;
     $("#upRate").textContent = upv; $("#upUnit").textContent = upu;
+    const tint = active === "vpn" || active === "mixed" ? "var(--vpn)"
+      : active === "direct" ? "var(--dir)" : "var(--dim-2)";
+    $("#dnLine").style.stroke = tint;
+    document.querySelectorAll("#gDn stop").forEach((st, i) => {
+      st.style.stopColor = tint; st.style.stopOpacity = i ? "0" : ".14";
+    });
     renderMainChart();
     const tn = s.tunnel || {};
     $("#dnTotal").textContent = fmtBytes(tn.download_total);
@@ -637,6 +668,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     if (!toastEl) {
       toastEl = document.createElement("div");
       toastEl.id = "toast";
+      toastEl.setAttribute("role", "status");
+      toastEl.setAttribute("aria-live", "polite");
       document.body.appendChild(toastEl);
     }
     toastEl.textContent = msg;

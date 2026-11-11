@@ -9,6 +9,13 @@ python server.py       →  http://127.0.0.1:7717/
 打开后是一块深色仪表盘：顶部一句话判定，中间两条并列的"出口路径"，
 下面是实时吞吐、通道探测、按域名的流量和网卡明细。
 
+![FLOW 面板](docs/panel.png)
+
+> 示意图。里面的 IP、SSID、节点名、流量数字全是演示数据（`192.168.1.x` / `203.0.113.x`），
+> 不是任何人的真实网络。
+
+变更见 [CHANGELOG.md](CHANGELOG.md)。
+
 ---
 
 ## 一、面板在看什么
@@ -19,8 +26,9 @@ python server.py       →  http://127.0.0.1:7717/
 |---|---|
 | **走 VPN** | 系统代理开着且指向 mihomo，代理感知型程序（浏览器等）全部经隧道 |
 | **直连** | 系统代理没开，也没有别的分流，流量直接出去 |
-| **部分走 VPN** | mihomo 在跑，但系统代理没开 —— 只有显式配了代理的程序走隧道 |
-| **隧道异常** | mihomo 进程/控制器/端口没了，或系统代理指向了一个不存在的代理 |
+| **部分走 VPN** | 代理客户端在跑，但系统代理没开 —— 只有显式配了代理的程序走隧道 |
+| **隧道异常** | 控制器没了，或系统代理指向了一个不存在的代理 |
+| **部分可见** | 认出客户端（v2rayN / WireGuard 等），但它不暴露连接表 —— 只展示网卡与出口 |
 
 副标题给出关键坐标，比如 `hk-node-07 · 203.0.113.24`（节点 + 隧道出口 IP）。
 下面那行灰字是判定依据，例如"系统代理已开启并指向 127.0.0.1:7890（mihomo global 模式）"。
@@ -28,7 +36,7 @@ python server.py       →  http://127.0.0.1:7717/
 ### 2. 出口路径（两条泳道）
 
 ```
-VPN  代理隧道   本机 ── 网卡 ── 节点 ── 出口        承载 3 条 · 171ms
+VPN  代理隧道   本机 ── 网卡 ── 节点 ── 出口        承载 3 条 · rule · TUN 关 · 96ms
 直连 不经代理   本机 ── 网卡 ── 出口              目标不通 · 对照 58 ms
 ```
 
@@ -59,12 +67,43 @@ VPN  代理隧道   本机 ── 网卡 ── 节点 ── 出口        承�
 
 ---
 
-## 二、它是怎么判定的（数据来源）
+## 二、适配哪些客户端（自动发现，不用配）
+
+面板不认死某一家软件。起来之后它自己找：
+
+1. 谁在本地监听（`netstat -ano`）→ 端口归属哪个进程
+2. 对可疑端口探 `GET /version` —— 能回 `{"version": …}` 的就是 **Clash 系 REST API**
+   （mihomo / Clash Verge / ClashX Meta / Mihomo Party / FlClash / sing-box 的 clash_api 都符合）
+3. 读内核进程的命令行，抠出 `-f / -c / --config / -d` → 配置文件路径
+4. 解析配置里的 `proxies:`（YAML）或 `outbounds`（JSON）→ 节点表、节点数、内容指纹
+
+于是这些不用额外配置就能认出来：
+
+| 客户端 | 怎么认的 | 能拿到什么 |
+|---|---|---|
+| 鹰云 MyVPN、Clash Verge、Mihomo Party、FlClash、Clash for Windows | Clash API + 配置 | 节点名、模式、TUN、连接数、订阅状态 |
+| sing-box（开了 clash_api） | Clash API + JSON 配置 | 节点名、模式 |
+| v2rayN / Xray / NekoRay | 进程 + 配置 | 客户端名、端口（节点名拿不到） |
+| WireGuard / OpenVPN / 深信服 / Tailscale | 进程 + 网卡 | 客户端名 |
+| 没见过的客户端（比如只叫 `proxy.exe`） | 直接用进程名 | 名字 + 控制器（如果它是 Clash 系） |
+
+**"节点"一栏显示的是这家软件自己的叫法**（如 `🦅 新加坡-2`），不是 IP；
+换客户端、换订阅之后名字会自动跟上，配置里反查不到就退回到接口给的当前节点。
+
+**订阅更新**：Clash 系直接读 `/providers/proxies` 拿订阅名、上次更新时间、已用流量和到期时间；
+把订阅拉平成一个大 yaml 的客户端（鹰云这类）则盯配置文件的内容指纹 ——
+节点表一变，"订阅 X 分钟前更新"立刻刷新，节点名也重新解析。
+
+---
+
+## 三、它是怎么判定的（数据来源）
 
 | 事实 | 来源 |
 |---|---|
 | 系统代理开关/地址 | 注册表 `HKCU\...\Internet Settings` 的 `ProxyEnable` / `ProxyServer` |
-| mihomo 在不在、什么模式、TUN 开没开 | `http://127.0.0.1:7892/configs`、`/version` |
+| 客户端是谁、控制器在哪 | `netstat` 端口归属 + WMI 进程表；控制器地址自动发现，`config.json` 里的只是提示 |
+| 什么模式、TUN 开没开、节点表 | 控制器的 `/configs`、`/version`，加上内核命令行指向的配置文件 |
+| 当前节点叫什么 | 控制器 `now`（GLOBAL / 各 Selector 的投票）→ 连接链；问不到就用出口 IP 反查配置里的 `server` |
 | 每条连接走没走代理、走了哪个节点 | `/connections` 的 `chains`（`DIRECT` = 直连） |
 | 每个域名的实时速率 | 对 `/connections` 里每条连接的累计字节做 1 Hz 差分，按 `metadata.host` 归并 |
 | 隧道出口 IP | 经 7890 访问 `ip-api.com`（120 秒一次） |
@@ -75,7 +114,7 @@ VPN  代理隧道   本机 ── 网卡 ── 节点 ── 出口        承�
 
 ---
 
-## 三、跑起来
+## 四、跑起来
 
 ```powershell
 # 双击 start.cmd 也行
@@ -91,7 +130,7 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1 -Stop
 
 只依赖 Python 3.10+ 标准库，不需要装任何包。
 
-## 四、配置（`config.json`，改完重启生效）
+## 五、配置（`config.json`，改完重启生效）
 
 ```json
 {
@@ -106,12 +145,12 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1 -Stop
 ```
 
 - `sites`：要单独盯着速率的域名（后缀匹配，`chat.openai.com` 会算进 `openai.com`）
-- `controller` / `mixed_port`：mihomo 的 external-controller 和混合端口
+- `controller`：控制器地址，**留空就自动发现**（填了就先试它）；`mixed_port`：混合代理端口
 - `probe_target`：双通道探测打的目标（默认 ChatGPT）
 - `control_target`：直连泳道里那个"对照"目标
 - 也能用环境变量覆盖：`FLOW_PORT` / `FLOW_CONTROLLER` / `FLOW_MIXED` / `FLOW_SITES`
 
-## 五、接口
+## 六、接口
 
 | 路径 | 内容 |
 |---|---|
@@ -121,9 +160,10 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1 -Stop
 | `GET /?poll=1` | 让页面退化成 1 秒轮询（SSE 被挡时用） |
 | `POST /api/sites` | 增删监测域名：`{"action":"add"\|"remove","domain":"github.com"}`，成功 200，域名不合法 400，返回新的列表 |
 
-快照里的 `watched` 就是当前监测列表，`extras` 是其余正在跑流量的域名。
+快照里的 `watched` 是当前监测列表，`extras` 是其余正在跑流量的域名，
+`hist` 是服务端攒的最近 120 帧（约 2 分钟）—— 面板一打开就是有曲线的，不用空等。
 
-## 六、边界（重要）
+## 七、边界（重要）
 
 1. **只看得见经过 mihomo 的流量。** 系统代理关掉、程序又不认代理时，那部分流量
    在面板里是看不见的 —— 这时判定会显示"部分走 VPN"，而不是假装知道全部。
@@ -131,16 +171,21 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1 -Stop
 3. **直连泳道是"反证"**：它证明了"这个目标不走代理时通不通"，不代表某个具体程序的实际路径。
 4. 出口 IP 每 120/300 秒才刷新一次，节点切换后最多滞后这么久。
 5. TUN 模式打开时，"网卡"会变成 TUN 虚拟网卡，此时泳道展示的是隧道入口而非物理出口。
-6. 采集器只读本机状态，不改任何系统/代理配置。
+6. **不暴露 API 的客户端拿不到节点名**（v2rayN / WireGuard / OpenVPN 等），这时节点栏会空着或显示客户端名，不会编一个出来。
+7. 采集器只读本机状态，不改任何系统/代理配置。
 
-## 七、目录
+## 八、目录
 
 ```
 server.py          采集 + HTTP/SSE 服务（标准库，单文件）
+providers.py       VPN 客户端自动发现 / 配置解析 / 订阅感知
 config.json        配置
 web/index.html     面板（单文件，内联 CSS/JS，手写 SVG 曲线）
 start.ps1/.cmd     启动器（后台起服务 + 应用窗口打开面板）
+CHANGELOG.md       变更记录
+docs/panel.png     README 示意图（演示数据，由 tools/mock_state.py 生成）
 tools/peek.py      命令行看一眼当前快照（排障用）
+tools/mock_state.py 生成示意图用的假数据服务
 tools/shots/       联调时的界面截图
 state.json         每个站点的累计流量（自动生成）
 ```
