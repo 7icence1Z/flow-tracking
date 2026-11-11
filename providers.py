@@ -258,7 +258,7 @@ def _read(path: str, limit: int = 8 << 20) -> str:
 class Client:
     __slots__ = ("kind", "name", "core", "version", "api", "secret", "config", "data_dir",
                  "exe", "pid", "mode", "nodes", "nodes_hash", "updated", "sub", "proxies",
-                 "meta", "conf_mtime")
+                 "meta", "conf_mtime", "metrics", "local_proxy", "flow")
 
     def __init__(self):
         self.kind = "none"       # clash / singbox / v2ray / wireguard / openvpn / ssl / mesh / none
@@ -279,13 +279,17 @@ class Client:
         self.proxies: dict = {}
         self.meta = False
         self.conf_mtime = 0.0
+        self.metrics = ""        # 127.0.0.1:10085（Xray 的 /debug/vars 统计口）
+        self.local_proxy = ""    # 本地混合代理口 127.0.0.1:10808
+        self.flow = ""           # clash / xray / ""（流量数据从哪来）
 
     def pack(self) -> dict:
         return {
             "kind": self.kind, "name": self.name, "core": self.core, "version": self.version,
             "api": self.api, "config": self.config, "exe": self.exe, "pid": self.pid,
             "mode": self.mode, "nodes": self.nodes, "updated": self.updated,
-            "sub": self.sub, "meta": self.meta,
+            "sub": self.sub, "meta": self.meta, "flow": self.flow,
+            "metrics": self.metrics, "local": self.local_proxy,
         }
 
 
@@ -301,6 +305,9 @@ class Registry:
         self._last_tick = 0.0
         self._lock = threading.Lock()
         self._dns: dict[str, str] = {}
+        self._cfg_at = 0.0
+        self._db_at = 0.0
+        self._db_rows: list = []
 
     # -- 缓存
     def _table(self, force: bool = False) -> dict[int, dict]:
@@ -473,7 +480,8 @@ class Registry:
                     pass
             else:
                 self._fallback(c, table)
-            if c.config:
+                self._xray(c, table)
+            if c.config and c.flow != "xray":
                 self._nodes(c)
             self._sub(c)
             return c
@@ -517,6 +525,122 @@ class Registry:
             c.exe = info.get("path", "")
             c.config, c.data_dir = _conf_from_cmd(info.get("cmd", ""))
 
+    # -- Xray 系（v2rayN / Xray-core）
+    def _xray(self, c: Client, table: dict[int, dict]):
+        """没有 Clash API 的客户端：读它自己生成的 config.json
+
+        v2rayN 每次切节点都会重写这份文件，所以"当前用哪个节点"就在里面；
+        需要时连 guiNDB.db 把节点备注（软件里的叫法）也捞出来。
+        """
+        path = c.config if (c.config and os.path.exists(c.config)) else ""
+        if not path:
+            base = os.path.dirname(c.exe or "")
+            for cand in (os.path.join(base, "guiConfigs", "config.json"),
+                         os.path.join(base, "config.json")):
+                if os.path.exists(cand):
+                    path = cand
+                    break
+        if not path:
+            return
+        info = parse_xray_config(_read(path) or "")
+        if not info or not info.get("server"):
+            return
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            mtime = 0.0
+        c.config = path
+        c.conf_mtime = mtime
+        if mtime != self._cfg_at:
+            self._cfg_at = mtime
+            c.updated = mtime
+        c.local_proxy = info["local"] or c.local_proxy
+        c.metrics = info["metrics"] or c.metrics
+        if c.metrics:
+            c.flow = "xray"
+            c.kind = c.kind if c.kind not in ("none", "other") else "xray"
+        tag = info["proxy_tag"] or "proxy"
+        node = {"name": tag, "server": info["server"], "port": info["port"], "type": info["type"]}
+        self._remarks(c, node)
+        c.proxies = {tag: node}
+        c.nodes = 1
+
+    def _remarks(self, c: Client, node: dict):
+        """v2rayN 的节点备注存在 guiNDB.db（SQLite）里，按 地址+端口 反查
+
+        库里结构随版本变过，所以不假设表名/列名：只认"同时有 remarks、address 的列"。
+        查不到就当没有；读库 2 分钟一次，绝不因为解析失败拖慢主循环。
+        """
+        if not self._db_at or time.time() - self._db_at > 120:
+            self._db_at = time.time()
+            self._db_rows = self._read_db(os.path.join(
+                os.path.dirname(c.config or ""), "guiNDB.db"))
+        rows = self._db_rows
+        if not rows:
+            return
+        c.nodes = len(rows)                      # 软件里一共多少个节点
+        want = str(node.get("server") or "").lower()
+        port = int(node.get("port") or 0)
+        for rem, addr, prt in rows:
+            if str(addr or "").lower() != want:
+                continue
+            if port and prt and int(prt) != port:
+                continue
+            if rem:
+                node["name"] = str(rem)
+                return
+
+    @staticmethod
+    def _read_db(db: str) -> list:
+        if not db or not os.path.exists(db):
+            return []
+        try:
+            import sqlite3
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+        except Exception:
+            return []
+        try:
+            con.execute("PRAGMA query_only=ON")
+            cur = con.cursor()
+            for (t,) in cur.execute(
+                    "select name from sqlite_master where type='table'").fetchall():
+                try:
+                    cols = [str(r[1]).lower() for r in cur.execute(f'pragma table_info("{t}")')]
+                except Exception:
+                    continue
+                if "remarks" in cols and "address" in cols:
+                    sel = "remarks,address" + (",port" if "port" in cols else ",0")
+                    rows = cur.execute(f'select {sel} from "{t}"').fetchall()
+                    if rows:
+                        return rows
+            return []
+        except Exception:
+            return []
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+    def xray_stats(self) -> dict:
+        """Xray 的统计口：GET /debug/vars → 每个 outbound 的累计上下行字节
+
+        返回 {tag: (上行字节, 下行字节)}；proxy / direct 两个 tag 正好就是
+        "走没走代理"的字节级拆分。
+        """
+        c = self.client
+        if not c.metrics:
+            return {}
+        try:
+            js = _http_json(c.metrics, "/debug/vars", "", 1.0)
+        except Exception:
+            return {}
+        out: dict[str, tuple[int, int]] = {}
+        for tag, d in ((js or {}).get("stats") or {}).get("outbound", {}).items():
+            if isinstance(d, dict):
+                out[str(tag)] = (int(d.get("uplink") or 0), int(d.get("downlink") or 0))
+        return out
+
     # -- 给节点名做的兜底：拿出口 IP 反查配置里的 server
     def match_exit(self, exit_ip: str) -> dict:
         c = self.client
@@ -546,3 +670,57 @@ class Registry:
 
 def preview(client: Client) -> dict:
     return client.pack()
+
+
+# ── Xray 系（v2rayN / Xray-core）─────────────────────────────────────────
+# v2rayN 没有 Clash 那种连接表，但它做了一件很有用的事：为了让界面显示实时速率，
+# 它在生成的 config.json 里开了 stats + metrics（见 ServiceLib/.../V2rayStatisticService.cs），
+# metrics 监听 127.0.0.1:<port>，GET /debug/vars 回一份 JSON，
+# 里面有按 outbound tag 累计的上下行字节（app/metrics/metrics.go）。
+# 于是"走直连还是走代理"在这类客户端上也能精确到字节，只是拆不到域名。
+SKIP_TAGS = {"direct", "block", "api", "metrics", "dns", "freedom", "blackhole"}
+
+
+def parse_xray_config(text: str) -> dict:
+    """从 Xray 配置里抠出：统计端口、本地代理端口、当前节点、出口地址。
+
+    v2rayN 每切一次节点就重写这份配置，所以它本身就是"现在用的是哪个"的真相。
+    """
+    try:
+        j = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(j, dict) or "outbounds" not in j:
+        return {}
+    out = {"metrics": "", "local": "", "proxy_tag": "", "server": "", "port": 0, "type": ""}
+    m = (j.get("metrics") or {}).get("listen") or ""
+    if m:
+        out["metrics"] = m if ":" in m else f"127.0.0.1:{m}"
+    for ib in j.get("inbounds") or []:
+        proto = str(ib.get("protocol") or "").lower()
+        if proto in ("mixed", "socks", "http") and ib.get("port"):
+            listen = str(ib.get("listen") or "127.0.0.1")
+            if listen in ("127.0.0.1", "0.0.0.0", "localhost", "::", ""):
+                out["local"] = f"127.0.0.1:{ib['port']}"
+                break
+    for ob in j.get("outbounds") or []:
+        tag = str(ob.get("tag") or "").lower()
+        proto = str(ob.get("protocol") or "").lower()
+        if proto in ("freedom", "blackhole", "dns") or tag in SKIP_TAGS:
+            continue
+        st = ob.get("settings") or {}
+        if not isinstance(st, dict):
+            continue
+        arr = st.get("vnext") or st.get("servers") or []
+        if not arr:
+            continue
+        srv = str(arr[0].get("address") or "")
+        if not srv:
+            continue
+        out["proxy_tag"] = str(ob.get("tag") or "proxy")
+        out["server"] = srv
+        out["port"] = int(arr[0].get("port") or 0)
+        out["type"] = proto.upper()
+        break
+    return out
+

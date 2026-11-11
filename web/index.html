@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>FLOW · 流量出口</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0c0e'/%3E%3Cpath d='M13 46 L27 31 L37 39 L51 17' stroke='%23d99a4e' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='51' cy='17' r='5' fill='%23d99a4e'/%3E%3C/svg%3E">
 <style>
 :root{
   color-scheme:dark;
@@ -281,8 +282,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       <path id="upLine" fill="none" style="stroke:var(--up)" stroke-width="1" stroke-opacity=".85" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>
     </svg></div>
     <div class="totals">
-      <span>本次 ↓ <b id="dnTotal">0 B</b></span>
-      <span>本次 ↑ <b id="upTotal">0 B</b></span>
+      <span><span id="dnTotalCap">本次</span> ↓ <b id="dnTotal">0 B</b></span>
+      <span><span id="upTotalCap">本次</span> ↑ <b id="upTotal">0 B</b></span>
       <span>连接 <b id="connCount">0</b></span>
     </div>
   </section>
@@ -302,7 +303,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     <div class="card-head">
       <h2>站点</h2>
       <div class="sites-ops">
-        <span class="note">按域名归并 · 1s 采样</span>
+        <span class="note" id="siteNote">按域名归并 · 1s 采样</span>
         <button class="mini" id="addSiteBtn" type="button" title="添加要盯的域名">＋ 域名</button>
       </div>
     </div>
@@ -464,11 +465,12 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       const key = s.key === "other" ? "其他" : s.label;
       seen.add(key);
       const r = ensureRow(key);
-      const removable = s.key !== "other";
+      const hk = s.fixed ? s.key : key;    // 固定行（经代理/直连）的历史按 key 存，和后端一致
+      const removable = s.key !== "other" && !s.fixed;
       r.del.hidden = !removable;
       if (removable) r.del.onclick = ev => { ev.stopPropagation(); siteAction("remove", s.label); };
-      hist.vpnSites.set(key, hist.vpnSites.get(key) || []);
-      const q = hist.vpnSites.get(key);
+      hist.vpnSites.set(hk, hist.vpnSites.get(hk) || []);
+      const q = hist.vpnSites.get(hk);
       q.push({ d: s.down, u: s.up });
       if (q.length > HIST) q.shift();
 
@@ -489,6 +491,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
         : via === "direct" ? "rgba(95,173,165,.11)" : "rgba(223,227,232,.05)";
       r.tag.dataset.via = via;
       r.tag.textContent = via === "vpn" ? "VPN" : via === "direct" ? "直连" : "空闲";
+      r.tag.hidden = r.tag.textContent === s.label;   // "直连 直连" 这种重复就别写了
       const [dn, dnu] = fmtRate(s.down);
       const [up, upu] = fmtRate(s.up);
       r.d.textContent = s.down ? dn : "0";
@@ -497,7 +500,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       r.uu.textContent = upu;
       r.dn.classList.toggle("idle", !s.down);
       r.up.classList.toggle("idle", !s.up);
-      r.el.title = `${s.label} · ${s.conns} 条连接${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}\n累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`;
+      r.el.title = s.fixed
+        ? `${s.label} · 累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`
+        : `${s.label} · ${s.conns} 条连接${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}\n累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`;
     }
     for (const [key, r] of rowCache) {
       if (!seen.has(key)) { r.el.remove(); rowCache.delete(key); hist.vpnSites.delete(key); }
@@ -520,6 +525,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   function render(s) {
     const now = Date.now();
     const cli = s.client || {};
+    const isX = s.flow === "xray";
     lastPing = now;
 
     // 首次拿到快照时用服务端攒的历史打底，面板一打开就有曲线，而不是空等两分钟
@@ -561,10 +567,15 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     $("#vpnExit").textContent = eg.vpn_ip || "待测";
     const conns = (s.tunnel || {}).conns || 0;
     const tn2 = s.tunnel || {};
-    const knobs = `${cli.mode || "?"} · TUN ${tn2.tun ? "开" : "关"}`;
-    const rtt = node.rtt == null ? "" : node.rtt < 0 ? " · 节点超时" : ` · ${node.rtt}ms`;
+    const isXray = s.flow === "xray";
+    // 没有连接表时"承载 N 条"和"rule 模式"都是空话，换成它真正能说的
+    const head = isXray
+      ? `<span class="on">统计口 ${(cli.metrics || "").split(":")[1] || "—"}</span>`
+      : `<span class="on">承载 ${conns} 条</span>`;
+    const knobs = `${isXray ? (cli.name || "内核") : (cli.mode || "?")} · TUN ${tn2.tun ? "开" : "关"}`;
+    const rtt = !node.rtt ? "" : node.rtt < 0 ? " · 节点超时" : ` · ${node.rtt}ms`;
     $("#vpnMeta").innerHTML = vpnLane
-      ? `<span class="on">承载 ${conns} 条</span> · ${knobs}${rtt}`
+      ? `${head} · ${knobs}${rtt}`
       : `未承载流量 · ${knobs}${rtt}`;
 
     /* 路径 B：直连 */
@@ -604,11 +615,20 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     });
     renderMainChart();
     const tn = s.tunnel || {};
-    $("#dnTotal").textContent = fmtBytes(tn.download_total);
-    $("#upTotal").textContent = fmtBytes(tn.upload_total);
-    $("#connCount").textContent = tn.conns ?? 0;
-    $("#tpNote").textContent = active === "down" ? "隧道未连接，无计数"
-      : vpnLane ? "经隧道（全机代理流量）" : "直连流量（隧道未承载）";
+    const cum = (k) => (s.sites || []).reduce((a, r) => a + (r["total_" + k] || 0), 0);
+    $("#dnTotalCap").textContent = isX ? "累计" : "本次";
+    $("#upTotalCap").textContent = isX ? "累计" : "本次";
+    $("#dnTotal").textContent = fmtBytes(isX ? cum("down") : tn.download_total);
+    $("#upTotal").textContent = fmtBytes(isX ? cum("up") : tn.upload_total);
+    $("#connCount").textContent = isX ? "—" : (tn.conns ?? 0);
+    $("#siteNote").textContent = isX ? "按出口归并 · 1s 采样" : "按域名归并 · 1s 采样";
+    // 没有连接表就没有逐域名数据：别让"＋ 域名"点了却永远没数
+    $("#addSiteBtn").hidden = isX;
+    if (isX) { $("#siteForm").hidden = true; }
+    $("#tpNote").textContent = isX
+      ? (active === "down" ? "统计口未响应" : "Xray 统计 · 经代理的字节")
+      : (active === "down" ? "隧道未连接，无计数"
+        : vpnLane ? "经隧道（全机代理流量）" : "直连流量（隧道未承载）");
 
     /* 探测 */
     const pv = probes.vpn || {}, pc = probes.control || {};

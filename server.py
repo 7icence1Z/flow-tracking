@@ -492,6 +492,7 @@ class Collector:
     def __init__(self, net: NetInfo):
         self.net = net
         self.prev: dict[str, tuple[int, int]] = {}
+        self.xprev: dict[str, tuple[int, int]] = {}     # Xray 统计口的上一帧累计值
         self.last_ts = 0.0
         self.ema: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
         self.ex_ema: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
@@ -691,20 +692,85 @@ class Collector:
         self._publish(ok=True, conns=len(conns), total=(self.tot[0], self.tot[1]),
                       rows=rows, raw=data)
 
-    def _publish(self, ok, conns=0, total=(0.0, 0.0), rows=None, raw=None):
+    @property
+    def proxy(self) -> str:
+        """当前真正在用的本地代理口：Clash 系看配置，Xray 系看它生成的 config.json"""
+        return DISCO.client.local_proxy or MIXED
+
+    def sample_xray(self):
+        """非 Clash 系：用 Xray 的统计口按"经代理 / 直连"两个出口归并
+
+        v2rayN 为了画实时速率曲线，自己在生成的配置里开了 stats + metrics，
+        GET /debug/vars 回来的就是每个 outbound 的累计字节。拆不到域名，
+        但"哪些字节走了隧道"是精确的，不是估的。
+        """
+        now = time.time()
+        stats = DISCO.xray_stats()
+        if not stats:
+            self.error = "Xray 统计口不可达"
+            self._publish(ok=False, flow="xray")
+            return
+        self.error = ""
+        dt = max(0.25, now - self.last_ts) if self.last_ts else 1.0
+        self.last_ts = now
+
+        cli = DISCO.client
+        ptag = next(iter(cli.proxies), "proxy")
+        proxy = stats.get(ptag) or stats.get("proxy") or (0, 0)
+        direct = (0, 0)
+        for tag, v in stats.items():
+            if tag in (ptag, "proxy"):
+                continue
+            direct = (direct[0] + v[0], direct[1] + v[1])
+
+        rows = []
+        for key, label, via, cur in (("proxy", "经代理", "vpn", proxy),
+                                     ("direct", "直连", "direct", direct)):
+            pu, pd = self.xprev.get(key, (-1, -1))
+            du = 0 if pu < 0 else max(0, cur[0] - pu)
+            dd = 0 if pd < 0 else max(0, cur[1] - pd)
+            self.xprev[key] = cur
+            e = self.ema[key]
+            e[0] = e[0] * 0.45 + (dd / dt) * 0.55
+            e[1] = e[1] * 0.45 + (du / dt) * 0.55
+            rows.append({
+                "key": key, "label": label, "watched": True, "fixed": True,
+                "down": round(e[0]), "up": round(e[1]), "conns": 0, "ip": "",
+                "chain": (cli.name or cli.core) if key == "proxy" else "",
+                "rule": "", "via": "idle" if e[0] + e[1] < 1 else via,
+                "total_down": round(cur[1]), "total_up": round(cur[0]),
+            })
+
+        self.tot[0] = rows[0]["down"] + rows[1]["down"]
+        self.tot[1] = rows[0]["up"] + rows[1]["up"]
+        self.hist_total.append([round(self.tot[0]), round(self.tot[1])])
+        if len(self.hist_total) > HIST_MAX:
+            del self.hist_total[:-HIST_MAX]
+        for r in rows:
+            q = self.hist_sites.setdefault(r["key"], [])
+            q.append([r["down"], r["up"]])
+            if len(q) > HIST_MAX:
+                del q[:-HIST_MAX]
+        self._publish(ok=True, conns=0, total=(self.tot[0], self.tot[1]),
+                      rows=rows, flow="xray")
+
+    def _publish(self, ok, conns=0, total=(0.0, 0.0), rows=None, raw=None, flow=""):
         cfg = self.cfg or {}
         tun = bool((cfg.get("tun") or {}).get("enable"))
         mode = cfg.get("mode", "")
-        mixed_no = MIXED.split(":")[-1]
         sp_on = self.sysproxy.get("enable") == 1
 
         cli = DISCO.client
-        if not ok:
+        if not ok and flow == "xray":
+            active = "vpn" if sp_on else ("mixed" if cli.name else "down")
+            reason = (f"{cli.name or '客户端'} 在跑，但统计口 {cli.metrics or '?'} 这一帧没响应，"
+                      f"字节数暂时读不到")
+        elif not ok:
             # 没有 Clash 系控制器：别的客户端（v2rayN / WireGuard / 深信服…）不暴露连接表，
             # 这时只能说清楚"能看见什么"，不能假装知道逐条流量
             if sp_on:
                 active = "vpn"
-                reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or MIXED}，"
+                reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or self.proxy}，"
                           f"但没找到可读的连接控制器，逐条明细不可见")
             elif cli.name and cli.kind not in ("clash", "singbox", "none"):
                 active = "mixed"
@@ -713,8 +779,10 @@ class Collector:
                 active, reason = "down", "本地控制器没有响应，无法读取连接表"
         elif sp_on:
             active = "vpn"
-            reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or MIXED}"
-                      f"（{cli.core or '内核'} {mode or '?'} 模式），代理感知型应用全部经隧道转发")
+            tail = (f"{cli.core} {mode} 模式" if mode
+                    else (cli.name or cli.core or "客户端"))
+            reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or self.proxy}"
+                      f"（{tail}），代理感知型应用全部经隧道转发")
         elif tun:
             active, reason = "vpn", "系统代理未开，但 TUN 已接管全部流量"
         elif mode == "global":
@@ -730,10 +798,12 @@ class Collector:
             "ok": ok,
             "error": self.error,
             "path": {"active": active, "reason": reason, "sysproxy": self.sysproxy},
-            "tunnel": {"up": ok, "mode": mode, "tun": tun, "mixed": MIXED,
-                       "controller": DISCO.client.api or CTRL, "version": self.ver, "conns": conns,
+            "tunnel": {"up": ok, "mode": mode, "tun": tun, "mixed": self.proxy,
+                       "controller": cli.metrics or cli.api or CTRL, "version": self.ver,
+                       "conns": conns,
                        "download_total": (raw or {}).get("downloadTotal", 0),
                        "upload_total": (raw or {}).get("uploadTotal", 0)},
+            "flow": flow or ("clash" if ok else ""),
             "client": DISCO.client.pack(),
             "iface": self.net.iface,
             "route": self.net.route,
@@ -767,10 +837,10 @@ class Collector:
     def probe_egress(self):
         now = time.time()
         if now - self.egress["vpn_ts"] > 120:
-            r = http_get("http://ip-api.com/line/?fields=query,country", MIXED, timeout=8, read=256)
+            r = http_get("http://ip-api.com/line/?fields=query,country", self.proxy, timeout=8, read=256)
             ip, geo = self._parse_ipapi(r.get("body", "")) if r["ok"] else ("", "")
             if not ip:
-                r2 = http_get("https://api.ipify.org", MIXED, timeout=8, read=64)
+                r2 = http_get("https://api.ipify.org", self.proxy, timeout=8, read=64)
                 if r2["ok"]:
                     ip = r2["body"].strip()
             self.egress["vpn_ip"] = ip
@@ -795,7 +865,7 @@ class Collector:
                 self.read_sysproxy()
                 if n % 3 == 0:
                     self.tick_cfg()
-                self.probes["vpn"] = {**http_get(PROBE_TARGET, MIXED, timeout=8),
+                self.probes["vpn"] = {**http_get(PROBE_TARGET, self.proxy, timeout=8),
                                       "ts": time.time(), "target": PROBE_TARGET}
                 self.probe_egress()
             except Exception as e:
@@ -819,7 +889,10 @@ class Collector:
         while not stop.is_set():
             t0 = time.time()
             try:
-                self.sample()
+                if DISCO.client.flow == "xray" and DISCO.client.metrics:
+                    self.sample_xray()
+                else:
+                    self.sample()
             except Exception as e:
                 log("sample:", e)
             stop.wait(max(0.05, 1.0 - (time.time() - t0)))

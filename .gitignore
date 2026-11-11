@@ -1,9 +1,15 @@
-﻿# 运行时产物
+# 运行时产物
 state.json
 *.log
 __pycache__/
 __pycache__/**
 # 启动器用的独立浏览器 profile
 .edge-profile/
-# 开发期抓图与临时脚本
-tools/
+# 应用窗口用的独立浏览器 profile
+.app-profile/
+
+# 开发期抓图与临时脚本：只放出去能用的这几个，截图和一次性脚本留在本机
+tools/*
+!tools/peek.py
+!tools/mock_state.py
+!tools/test_xray.py
