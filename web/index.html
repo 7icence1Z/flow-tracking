@@ -543,6 +543,11 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       r.el.title = s.fixed
         ? `${s.label} · 累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`
         : `${s.label} · ${s.conns} 条连接${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}\n累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`;
+      // 本机模式下这行包含"经代理"的字节：说明是哪来的，别让人以为隧道流量漏了
+      if (hostMode && s.px > 0) {
+        r.el.title += `\n其中经代理约 ${fmtRate(s.px)[0]} ${fmtRate(s.px)[1]}`
+          + "（数的是它连本地代理口那条回环连接）";
+      }
     }
     for (const [key, r] of rowCache) {
       if (!seen.has(key)) { r.el.remove(); rowCache.delete(key); hist.vpnSites.delete(key); }
@@ -593,6 +598,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const iface = s.iface || {};
     const eg = s.egress || {};
     const probes = s.probes || {};
+    // 本机模式下管理员已经从回环代理口数出经代理字节：措辞可以再确切一步
+    const pxHost = !!((s.host || {}).proxy);
 
     const vd = $("#verdict");
     vd.dataset.s = active;
@@ -603,13 +610,14 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       : active === "mixed" ? "系统代理未开 · 仅显式代理的程序经隧道"
         : active === "direct" ? (eg.direct_ip || "") : "";
     if (isHost) {
-      // 没有代理客户端、或客户端在跑但没在转发：不能说"直连"就不管了，
-      // 得让人知道现在是按网卡在数，以及为什么隧道那边没数
+      // 本机模式下的措辞以后端为准（p.brief）：可能真没在用隧道，
+      // 也可能是客户端在转发、只是没给字节数 —— 后者绝不能写成"没在转发"（issue #1）
       const cliName = (s.client || {}).name || "";
-      $("#verdictText").textContent = "本机直连";
-      $("#verdictSub").textContent = cliName
-        ? `${cliName} 没在转发 · 按网卡统计，不区分隧道`
-        : "没检测到代理客户端 · 按网卡统计，不区分隧道";
+      $("#verdictText").textContent = active === "mixed" ? "部分走 VPN" : "本机直连";
+      $("#verdictSub").textContent = p.brief
+        || (cliName ? (pxHost ? `${cliName} · 在转发 · 经代理按本地口数`
+                              : `${cliName} · 读不到它的流量 · 按网卡统计`)
+                    : "没检测到代理客户端 · 按网卡统计");
     }
 
     /* 路径 A：VPN */
@@ -628,11 +636,20 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const isXray = isX;
     const host = s.host || {};
     // 没有连接表时"承载 N 条"和"rule 模式"都是空话，换成它真正能说的
-    const head = isXray
-      ? `<span class="on">统计口 ${(cli.metrics || "").split(":")[1] || "—"}</span>`
-      : `<span class="on">承载 ${conns} 条</span>`;
+    // 本机模式下连"隧道有没有承载"都读不到：只能说客户端是否在转发、字节数不可读
+    const spServer = String((p.sysproxy || {}).server || "").split(";")[0].replace(/^[a-z]+=/, "");
+    const head = isHost
+      ? (active === "mixed"
+          ? (pxHost ? `<span class="on">在转发 · 经代理按本地口数</span>`
+                    : `<span class="on">在转发 · 字节数不可读</span>`)
+          : `<span class="off">隧道未承载</span>`)
+      : isXray
+        ? `<span class="on">统计口 ${(cli.metrics || "").split(":")[1] || "—"}</span>`
+        : `<span class="on">承载 ${conns} 条</span>`;
     const knobs = isHost
-      ? `隧道未启用 · TUN ${tn2.tun ? "开" : "关"}`
+      ? (active === "mixed"
+          ? `系统代理 → ${spServer || "客户端本地口"}`
+          : `隧道未启用 · TUN ${tn2.tun ? "开" : "关"}`)
       : `${isXray ? (cli.name || "内核") : (cli.mode || "?")} · TUN ${tn2.tun ? "开" : "关"}`;
     const rtt = !node.rtt ? "" : node.rtt < 0 ? " · 节点超时" : ` · ${node.rtt}ms`;
     const pxRate = px ? ` · ↓${fmtRate(px.down)[0]} ${fmtRate(px.down)[1]}` : "";
@@ -701,10 +718,17 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const rate = (o, k) => { const [v, u] = fmtRate((o || {})[k] || 0); return v + " " + u; };
     $("#tpNote").textContent = isHost
       ? (host.nic ? `本机网卡总量 · ${host.nic}` : "本机网卡总量")
+        + (px ? ` · 经代理 ${rate(px, "down")}` : "")
       : (px && dr)
         ? `经代理 ${rate(px, "down")} · 不走代理 ${rate(dr, "down")}`
         : (active === "down" ? "隧道未连接，网卡照数" : "网卡总量");
-    $("#tpNote").title = isHost ? ""
+    $("#tpNote").title = isHost
+      ? ((px && dr)
+        ? `${split.src === "loop" ? "经代理（回环口 eStats，TCP）" : "经代理（客户端统计口）"}：`
+          + `↓${rate(px, "down")} ↑${rate(px, "up")}\n`
+          + `不走代理（估算 = 网卡 − 经代理）：↓${rate(dr, "down")} ↑${rate(dr, "up")}\n`
+          + `网卡总量（含 UDP/QUIC）：↓${rate(t, "down")} ↑${rate(t, "up")}`
+        : "")
       : `网卡总量（含 UDP/QUIC）：↓${rate(t, "down")} ↑${rate(t, "up")}\n`
         + `经代理：↓${rate(px, "down")} ↑${rate(px, "up")}\n`
         + `不走代理（估算）：↓${rate(dr, "down")} ↑${rate(dr, "up")}`;
@@ -714,7 +738,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     setProbe("#pvPill", "#pvRes", pv, "代理→目标");
     setProbe("#pdPill", "#pdRes", pd, "直连→目标");
     setProbe("#pcPill", "#pcRes", pc, "直连→baidu");
-    if (isHost) {
+    if (isHost && active !== "mixed") {
       // 没装/没开客户端时 7890 当然连不上，标红只会误导：这一路本来就没启用
       const pill = $("#pvPill");
       pill.className = "pill idle";
@@ -763,7 +787,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     if (route.dual) left += ` · 直连走 ${rd.name || "?"}${rd.ip ? " " + rd.ip : ""}`;
     $("#footLeft").textContent = left;
     $("#footRight").textContent = isHost
-      ? `本机模式 · ${hostBytes ? "管理员：逐进程速率" : "普通权限：只数连接"}`
+      ? `本机模式 · ${hostBytes ? (px ? "管理员：逐进程速率 + 分账" : "管理员：逐进程速率")
+        : "普通权限：只数连接"}`
         + ` · ${hhmmss(s.ts || Date.now() / 1000)}`
       : `控制器 ${tn.controller || ""} · ${s.ok ? "在线" : "离线"} · ${hhmmss(s.ts || Date.now() / 1000)}`;
   }

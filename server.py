@@ -553,6 +553,88 @@ class Collector:
         m2 = re.search(r"ProxyServer\s+REG_SZ\s+(\S+)", out2)
         self.sysproxy = {"enable": enable, "server": m2.group(1) if m2 else ""}
 
+    # -- 客户端到底在不在转发（而不是"读不到"被我当成"没在转发"）
+    @staticmethod
+    def _sysproxy_addrs(server: str) -> list:
+        """系统代理设置里出现的本机回环口
+
+        ProxyServer 可能是 "127.0.0.1:7890"，也可能是按协议分行写的
+        "http=127.0.0.1:10809;https=127.0.0.1:10809"。非本机地址一律忽略：
+        指向远端的那种，本机根本看不到是哪个进程在转发。
+        """
+        out = []
+        for m in re.finditer(r"(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})", server or ""):
+            port = int(m.group(2))
+            if 0 < port < 65536:
+                host = "127.0.0.1" if m.group(1).startswith(("localhost", "[::1]")) else m.group(1)
+                out.append((host, port))
+        return out
+
+    @staticmethod
+    def _why_unreadable(cli) -> str:
+        """为什么读不到这个客户端的字节数 —— 每种客户端的原因不一样，别混成一句"""
+        if cli.metrics:
+            return f"统计口 {cli.metrics} 没响应"
+        if cli.api:
+            return f"控制器 {cli.api} 没响应"
+        if cli.kind in ("v2ray", "xray"):
+            return "它没开统计口（v2rayN 的 guiItem.enableStatistics 是关的）"
+        return "它不提供字节统计"
+
+    def _forwarding_proxy(self):
+        """客户端此刻是否真的在转发：能证明就返回 (本地代理口, 证据)，证不了返回 ("", "")
+
+        判据缺一不可：系统代理开着 → 地址是本机回环口 → 那个口正在监听 →
+        监听它的进程就是这个客户端（它自己，或它的内核子进程，往上找两层）。
+
+        为什么非要多这一步：v2rayN 关掉统计口时，面板只拿得到网卡总量，
+        于是既证明不了"在转发"，也证明不了"没在转发"。少了这条判据，它就
+        会把"读不到字节数"说成"没在转发"，而这句断言是错的（issue #1）。
+        """
+        cli = DISCO.client
+        if self.sysproxy.get("enable") != 1:
+            return "", ""
+        if not (cli.name and cli.kind != "none"):
+            return "", ""
+        ports = DISCO._ports()          # 端口 → PID，15 秒缓存
+        table = DISCO._table()          # PID → {name, ppid, ...}，30 秒缓存
+        stems = {providers._stem(cli.name), providers._stem(cli.core)} - {""}
+        for host, port in self._sysproxy_addrs(self.sysproxy.get("server") or ""):
+            try:
+                with socket.create_connection((host, port), timeout=0.25):
+                    pass
+            except OSError:
+                continue                # 没在监听：这一口不是转发口
+            pid = ports.get(port, 0)
+            owner = table.get(pid) or {}
+            ppid = owner.get("ppid", 0)
+            gppid = (table.get(ppid) or {}).get("ppid", 0)
+            if cli.pid and cli.pid in (pid, ppid, gppid):
+                return f"{host}:{port}", f"{cli.name} 的进程在监听它"
+            if providers._stem(owner.get("name", "")) in stems:
+                return f"{host}:{port}", f"{cli.core or cli.name} 内核在监听它"
+            # 口在监听，但不是它开的（是别的程序，或端口归属查不到）→ 不当证据
+            continue
+        return "", ""
+
+    def _proxy_ports(self) -> set:
+        """可能承载"经代理"的本地端口：系统代理口 + 客户端本地口 + 混合口
+
+        给 hostflow 用：应用 → 这些端口（回环）的连接上跑的就是隧道字节。
+        端口猜错不要紧 —— 多几个只会让"经代理"少算，不会把直连算成代理。
+        """
+        cli = DISCO.client
+        blob = " ".join([self.sysproxy.get("server") or "", cli.local_proxy or ""])
+        # 混合口只在"真有客户端在'用代理'"时才加：没客户端时 hostflow 不该去数 7890
+        if self.sysproxy.get("enable") == 1 or cli.local_proxy:
+            blob += " " + (self.proxy or "")
+        out = set()
+        for m in re.finditer(r":(\d{1,5})\b", blob):
+            port = int(m.group(1))
+            if 0 < port < 65536:
+                out.add(port)
+        return out
+
     def tick_cfg(self):
         if time.time() - self.cfg_ts < 15:
             return
@@ -583,7 +665,7 @@ class Collector:
             if nic and self.host.nic_name != nic:
                 self.host.nic_name = nic
         try:
-            s = self.host.sample(want_procs=want_procs)
+            s = self.host.sample(want_procs=want_procs, proxy_ports=self._proxy_ports())
         except Exception as e:                  # noqa: BLE001
             log("hostflow:", e)
             return {}
@@ -618,10 +700,16 @@ class Collector:
             # 管理员权限下 eStats 可用：每进程的 ↓↑ 速率就是真数字，
             # 直接发成"站点行"，UI 用同一套曲线画出来 —— 和 VPN 那边长得一样
             for p in s.get("procs") or []:
+                # 这行的字节已经是"直连 + 经代理"的合计；偏隧道就染成琥珀色，
+                # 一眼能看出哪个进程的流量主要在 VPN 里
+                pxt = (p.get("px_down") or 0.0) + (p.get("px_up") or 0.0)
+                tot = (p.get("down") or 0.0) + (p.get("up") or 0.0)
                 r = {"key": p["name"], "label": p["name"], "watched": True, "fixed": True,
                      "down": round(p.get("down") or 0), "up": round(p.get("up") or 0),
                      "conns": p.get("conns", 0), "ip": p.get("sample", ""),
-                     "chain": "", "rule": "", "via": "direct",
+                     "chain": "", "rule": "",
+                     "via": "vpn" if (tot > 0 and pxt >= tot * 0.6) else "direct",
+                     "px": round(pxt),
                      "remotes": p.get("remotes", 0),
                      "total_down": round(p.get("cum_down") or 0),
                      "total_up": round(p.get("cum_up") or 0)}
@@ -844,23 +932,53 @@ class Collector:
         # 同一个快照里必须是同一批证据：先钉住引用，再拿它算判定、也拿它当输出
         probes = self.probes
         link = self.link
-        self.diag = self._diagnose(probes, link, conns, flow)
-
+        # 本机模式下先捞"客户端是否真在转发"这条证据：判定和出口路径共用一份，
+        # 免得上面说"没在转发"、下面又显示着它的名字
+        fwd, fwd_why = self._forwarding_proxy() if flow == "host" else ("", "")
         host = self.host_data if flow == "host" else {}
+        # 回环口分账：管理员下 hostflow 能从"应用→本地代理口"的环回连接里
+        # 数出经代理字节，这时本机模式就不是"只能数网卡总量"了
+        hx = (host.get("proxy") or None) if flow == "host" else None
+        # 空转的"经代理 0"是噪音：没有转发证据、也确实一个字节都没数到，就当没有这一栏
+        if hx and not fwd and not (hx.get("down") or hx.get("up")):
+            hx = None
+        self.diag = self._diagnose(probes, link, conns, flow, fwd=fwd, px=bool(hx))
+
         ns = self.nic_data or {}
         cli = DISCO.client
+        brief = ""
         if flow == "host":
-            active = "direct"
             nic = ns.get("nic") or "未知"
             tail = ("管理员权限：每行的 ↓↑ 用内核 eStats 差分出来的（含 TCP 净荷，不含 UDP）"
                     if host.get("estats") else
                     "逐域名/逐进程的字节数要客户端统计口或管理员权限才看得到")
-            if hint:
-                # 客户端进程还在，但读不到它的数（没连节点 / 控制器没开）：
+            if fwd:
+                # 系统代理指着它的本地口、那口是它自己开的 → 它确实在转发，只是没给字节数。
+                # 这时"没在转发"是假话，"全部直连"也不对：显式走系统代理的程序都在隧道里。
+                active = "mixed"
+                if hx:
+                    # 管理员下我们已经从环回连接里数出了经代理字节，说法要跟着变
+                    reason = (f"{cli.name or '客户端'} 正在转发（系统代理 → {fwd}，{fwd_why}）—— "
+                              f"它没给字节统计（{self._why_unreadable(cli)}），"
+                              f"所以「经代理」是按本地代理口上的环回连接数的，"
+                              f"「不走代理」是网卡差出来的估算")
+                    brief = f"{cli.name or '客户端'} 在转发 · 经代理按本地口数，其余按网卡差额"
+                else:
+                    reason = (f"{cli.name or '客户端'} 正在转发（系统代理 → {fwd}，{fwd_why}），"
+                              f"但字节数读不到（{self._why_unreadable(cli)}）—— "
+                              f"只能按网卡「{nic}」数总量，分不出哪部分进了隧道")
+                    brief = f"{cli.name or '客户端'} 在转发，但读不到字节数 · 只按网卡「{nic}」统计"
+            elif hint:
+                # 客户端进程还在，但读不到它的数（没连节点 / 统计口没开 / 控制器没开）：
                 # 别再说"没检测到客户端"，也别停摆，按网卡继续数
+                active = "direct"
                 reason = f"{hint}：按网卡「{nic}」统计本机流量，{tail}"
+                brief = f"读不到 {cli.name or '客户端'} 的流量 · 按网卡「{nic}」统计"
             else:
+                active = "direct"
                 reason = f"没检测到代理客户端：按网卡「{nic}」统计本机流量，{tail}"
+                brief = f"没检测到代理客户端 · 按网卡「{nic}」统计"
+
         elif not ok and flow == "xray":
             active = "vpn" if sp_on else ("mixed" if cli.name else "down")
             reason = (f"{cli.name or '客户端'} 在跑，但统计口 {cli.metrics or '?'} 这一帧没响应，"
@@ -894,19 +1012,26 @@ class Collector:
         extras = sorted([r for r in (rows or []) if r["key"].startswith("extra:") and (r["down"] + r["up"]) > 0],
                         key=lambda r: -(r["down"] + r["up"]))[:MAX_EXTRA_ROWS]
 
-        # 分账：网卡总数是真的；"经代理"是客户端报的；两者之差就是没走代理的那部分
-        # （差里也含 UDP/QUIC 的帧开销，所以只能当估算看，面板上写"约"）
+        # 分账：网卡总数是真的；"经代理"优先用客户端报的；
+        # 本机模式下没有客户端统计口时，用 hostflow 从环回代理连接里数出来的那份
+        # （src=loop 表示"经代理"也是真数字，只是数的是回环口，不含 UDP/QUIC）；
+        # "不走代理"两种来源都是差值，所以只能当估算看，面板上写"约"
         ntot = ns.get("total") or (0.0, 0.0)
         prox = tuple(total) if (ok and flow != "host") else None
+        src = "api"
+        if ok and flow == "host" and hx:
+            prox = (hx.get("down") or 0.0, hx.get("up") or 0.0)
+            src = "loop"
         split = {"nic": {"down": round(ntot[0]), "up": round(ntot[1])},
                  "proxy": {"down": round(prox[0]), "up": round(prox[1])} if prox else None,
                  "direct": ({"down": max(0, round(ntot[0] - prox[0])),
-                             "up": max(0, round(ntot[1] - prox[1]))} if prox else None)}
+                             "up": max(0, round(ntot[1] - prox[1]))} if prox else None),
+                 "src": src if prox else ""}
 
         ST.publish({
             "ok": ok,
             "error": self.error,
-            "path": {"active": active, "reason": reason, "sysproxy": self.sysproxy},
+            "path": {"active": active, "reason": reason, "brief": brief, "sysproxy": self.sysproxy},
             "tunnel": {"up": ok and flow != "host", "mode": mode, "tun": tun, "mixed": self.proxy,
                        "controller": cli.metrics or cli.api or CTRL, "version": self.ver,
                        "conns": 0 if flow == "host" else conns,
@@ -1033,11 +1158,15 @@ class Collector:
             link["proxy_port"] = {"ok": False, "ms": 0, "kind": "unknown", "detail": "没有代理口"}
         self.link = link
 
-    def _diagnose(self, probes=None, link=None, conns=0, flow="") -> dict:
+    def _diagnose(self, probes=None, link=None, conns=0, flow="", fwd=None, px=False) -> dict:
         """把证据拼成一句话：这次连不上，最该怀疑谁
 
         顺序即优先级：链路 → 名字 → 隧道 → 目标本身。越底层的问题越先报，
         因为上层现象都是被它带出来的。
+
+        fwd：本机模式下"客户端确实在转发"的本地代理口（空 = 没证明到），
+        由 _forwarding_proxy() 算好传进来 —— 这里不自己探测，免得一帧里两套证据。
+        px：有没有从环回代理连接里数出字节（管理员）；有就别再嘴硬说"读不到字节数"。
         """
         # 调用方把这一帧的证据传进来，避免"判定用的探测"和"显示出来的探测"是两批数据
         p = probes if probes is not None else (self.probes or {})
@@ -1087,11 +1216,28 @@ class Collector:
         sp_on = self.sysproxy.get("enable") == 1
         client_on = bool(DISCO.client.name and DISCO.client.kind != "none")
         if flow == "host" and client_on:
-            # 客户端的壳还在跑，但转发那一层没起来（没连节点 / 控制器没开）：
-            # 这是"现在没在用隧道"，不是"隧道坏了"，所以给中性灰，不给红
+            # 客户端的壳还在跑，但转发那一层的数读不到：这是"现在没在用隧道"，
+            # 不是"隧道坏了"，所以给中性灰，不给红。
+            # 但要分清两种"读不到"：一种能证明它在转发（系统代理指着它自己开的
+            # 本地口），那种只能叫"读不到字节数"，绝不能替它说"没在转发"（issue #1）。
+            name = DISCO.client.name
+            if fwd:
+                if px:
+                    return out("nopx", "客户端在转发（按本地口分账）",
+                               f"系统代理指向 {fwd}，{name} 确实在转发；它的统计口没开"
+                               f"（{self._why_unreadable(DISCO.client)}），但本地代理口上的"
+                               f"回环连接能数出经代理字节 ——「经代理」是真数字，"
+                               f"「不走代理」是网卡差额（估算）",
+                               [x for x in ev if not x.startswith("代理通道")])
+                return out("nopx", "客户端在转发，读不到字节数",
+                           f"系统代理指向 {fwd}，{name} 确实在转发；但它没给字节统计"
+                           f"（{self._why_unreadable(DISCO.client)}）—— "
+                           f"这里只能数网卡总量，分不出哪一部分进了隧道",
+                           [x for x in ev if not x.startswith("代理通道")])
             return out("nopx", "没在走隧道，只看本机流量",
-                       f"{DISCO.client.name} 的进程还在，但本地代理口 / 控制器都连不上 —— "
-                       f"多半是没连节点；网卡总流量和连接数照数，逐域名明细要等它连上",
+                       f"{name} 的进程还在，但读不到它的流量统计 —— 要么没连节点，"
+                       f"要么它的统计来源没开；网卡总流量和连接数照数，"
+                       f"逐域名明细要等它能给出字节数",
                        [x for x in ev if not x.startswith("代理通道")])
         if not client_on and not sp_on and not tun:
             return out("nopx", "没有代理客户端，只看本机流量",
@@ -1201,8 +1347,17 @@ class Collector:
                     ok = self.sample_host() or True
                 else:
                     ok = self.sample()
-                    where = f"控制器 {cli.api} 没响应" if cli.api else "控制器没开"
-                    hint = f"{cli.name} 在跑，但读不到它的流量（没连节点，或{where}）"
+                    # 说清是"哪一环读不到"：v2rayN 关掉统计口时，控制器和代理口其实都好好的，
+                    # 再写"控制器没开"就是在冤枉它（issue #1）
+                    if cli.metrics:
+                        where = f"统计口 {cli.metrics} 没响应"
+                    elif cli.api:
+                        where = f"控制器 {cli.api} 没响应"
+                    elif cli.kind in ("v2ray", "xray"):
+                        where = "它的统计来源没开"
+                    else:
+                        where = "它不提供字节统计"
+                    hint = f"{cli.name} 在跑，但读不到它的流量（{where}）"
                 if not ok:
                     # 客户端在、数读不到：退回网卡统计，别让面板停在错误上不动
                     self.sample_host(hint=hint)

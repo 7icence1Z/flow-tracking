@@ -1,6 +1,8 @@
 """诊断逻辑自检：喂进构造好的证据，看它把锅甩给谁
 
-只测归因判定（_diagnose），不碰真实网络 —— 所以离线、可重复、秒级。
+只测归因判定（_diagnose）、"客户端在不在转发"的判据（_forwarding_proxy）、
+以及环回口分账的端口集合与累计（proxy_ports / hostflow.sample），
+不碰真实网络 —— 所以离线、可重复、秒级。用到的只有本机 netstat / WMI。
 运行：python -X utf8 tools\\test_diag.py
 """
 import os
@@ -47,10 +49,12 @@ DNS_FAIL = {"system": {"ok": False, "ms": 90, "ips": [], "kind": "dns"},
             "public": {"ok": True, "ms": 8, "ips": ["203.0.113.9"]}, "mismatch": False}
 
 
-def mk(probes, link=None, tun=False, route=None, proxy_port=None, conns=0, flow="", client=None):
+def mk(probes, link=None, tun=False, route=None, proxy_port=None, conns=0, flow="", client=None,
+       fwd=None, px=False):
     c = Fake()
     c.probes = probes
     c._test_conns, c._test_flow, c._test_client = conns, flow, client
+    c._test_fwd, c._test_px = fwd, px
     c.cfg = {"tun": {"enable": tun}, "mode": "rule"}
     c.net.route = route or {
         "vpn": {"name": "以太网 2", "kind": "ethernet", "ip": "192.0.2.10", "gateway": "192.0.2.1"},
@@ -126,6 +130,21 @@ CASES = [
         flow="host", client=("演示客户端", "clash")),
      "nopx"),
 
+    # issue #1：有证据表明客户端在转发（系统代理指着它自己开的本地口），
+    # 只是它没给字节数 —— 这时说"没在转发"就是假话
+    ("能证明它在转发，只是读不到字节数 → 中性且不说「没在转发」", dict(
+        probes={"control": ok(), "direct": bad("timeout"), "vpn": bad("refused")},
+        proxy_port={"ok": False, "ms": 1500, "kind": "refused"},
+        flow="host", client=("演示客户端", "v2ray"), fwd="127.0.0.1:10809"),
+     "nopx"),
+
+    # 管理员下环回口已经数出经代理字节：这时再说"读不到字节数"就又错了
+    ("能转发 + 也从环回口数到了字节 → 中性且说明分账来源", dict(
+        probes={"control": ok(), "direct": bad("timeout"), "vpn": bad("refused")},
+        proxy_port={"ok": False, "ms": 1500, "kind": "refused"},
+        flow="host", client=("演示客户端", "v2ray"), fwd="127.0.0.1:10809", px=True),
+     "nopx"),
+
     ("代理口通、但隧道里 0 条连接 → 没连上节点（中性）", dict(
         probes={"control": ok(), "direct": bad("timeout"), "vpn": bad("timeout")},
         conns=0, flow="clash"),
@@ -148,7 +167,8 @@ def main() -> int:
         cn = c._test_client
         server.DISCO.client.name, server.DISCO.client.kind = cn if cn else ("", "none")
         try:
-            got = c._diagnose(conns=c._test_conns, flow=c._test_flow)
+            got = c._diagnose(conns=c._test_conns, flow=c._test_flow,
+                              fwd=c._test_fwd, px=c._test_px)
         finally:
             server.DISCO.client.name, server.DISCO.client.kind = saved
         flag = "ok " if got["state"] == want else "FAIL"
@@ -207,6 +227,136 @@ def main() -> int:
         bad_n += got["state"] == "nopx"
         print(f"[{flag}] 2. 系统代理开着但没客户端 → 照旧报 VPN 问题")
         print(f"        → {got['state']}  「{got['label']}」")
+    finally:
+        server.DISCO.client = orig
+
+    print("\n=== 「在转发」还是「没在转发」（issue #1）===")
+    orig = server.DISCO.client
+    try:
+        server.DISCO.client = types.SimpleNamespace(
+            name="演示客户端", kind="v2ray", core="v2ray", metrics="", api="", flow="", pid=0)
+        c = mk({"control": ok(), "direct": bad("timeout"), "vpn": bad("refused")},
+               proxy_port={"ok": False, "ms": 1500, "kind": "refused"},
+               flow="host", client=("演示客户端", "v2ray"))
+        got = c._diagnose(conns=0, flow="host", fwd="127.0.0.1:10809")
+        good = "在转发" in got["label"] and "没在转发" not in got["why"]
+        bad_n += not good
+        print(f"[{'ok ' if good else 'FAIL'}] 1. 有转发证据 → 「{got['label']}」，不说「没在转发」")
+        print(f"        {got['why']}")
+
+        got = c._diagnose(conns=0, flow="host", fwd="")
+        good = "在转发" not in got["label"] and "连不上" not in got["why"]
+        bad_n += not good
+        print(f"[{'ok ' if good else 'FAIL'}] 2. 没证据 → 「{got['label']}」，也不顺口断言「代理口都连不上」")
+        print(f"        {got['why']}")
+
+        # 真开一个监听口，验证判据本身（只用本机 netstat / WMI，不联网）
+        import os as _os
+        import socket as _sk
+        lsn = _sk.socket()
+        lsn.bind(("127.0.0.1", 0))
+        lsn.listen(8)
+        port = lsn.getsockname()[1]
+
+        server.DISCO.client = types.SimpleNamespace(
+            name="演示客户端", kind="v2ray", core="v2ray", metrics="", api="", flow="",
+            pid=_os.getpid(), local_proxy=f"127.0.0.1:{port}")
+        c.sysproxy = {"enable": 1, "server": f"http=127.0.0.1:{port};https=127.0.0.1:{port}"}
+        addr, why = c._forwarding_proxy()
+        good = addr.endswith(f":{port}") and bool(why)
+        bad_n += not good
+        print(f"[{'ok ' if good else 'FAIL'}] 3. 本机口在听 + 进程对得上 → ({addr!r}, {why!r})")
+
+        c.sysproxy = {"enable": 0, "server": f"127.0.0.1:{port}"}
+        addr, why = c._forwarding_proxy()
+        good = (addr, why) == ("", "")
+        bad_n += not good
+        print(f"[{'ok ' if good else 'FAIL'}] 4. 系统代理关掉 → 不算在转发 ({addr!r})")
+
+        server.DISCO.client = types.SimpleNamespace(
+            name="演示客户端", kind="v2ray", core="v2ray", metrics="", api="", flow="",
+            pid=999999, local_proxy="")
+        c.sysproxy = {"enable": 1, "server": f"127.0.0.1:{port}"}
+        addr, why = c._forwarding_proxy()
+        good = addr == ""
+        bad_n += not good
+        print(f"[{'ok ' if good else 'FAIL'}] 5. 口不是它开的（别的程序占着）→ 不当证据 ({addr!r})")
+        lsn.close()
+    finally:
+        server.DISCO.client = orig
+
+    print("\n=== 环回口分账（不看客户端的统计口）===")
+    import socket as _sk
+    import time as _time
+
+    import hostflow as _hf
+    orig = server.DISCO.client
+    try:
+        server.DISCO.client = types.SimpleNamespace(
+            name="演示客户端", kind="v2ray", core="v2ray", metrics="", api="", flow="",
+            pid=0, local_proxy="")
+        c = mk({"control": ok(), "direct": ok(), "vpn": ok()}, flow="host")
+
+        c.sysproxy = {"enable": 1, "server": "http=127.0.0.1:10909;https=127.0.0.1:10909"}
+        ports = c._proxy_ports()
+        good = 10909 in ports
+        bad_n += not good
+        print(f"[{'ok ' if good else 'FAIL'}] 1. 系统代理开着 → 代理口进集合 {sorted(ports)}")
+
+        c.sysproxy = {"enable": 0, "server": ""}
+        ports = c._proxy_ports()
+        good = not ports
+        bad_n += not good
+        print(f"[{'ok ' if good else 'FAIL'}] 2. 没客户端也没系统代理 → 空集合，不去数 7890 {sorted(ports)}")
+
+        # 真开一个监听口 + 一条连接，eStats 换成假计数（所以不需要管理员）
+        lsn = _sk.socket()
+        lsn.bind(("127.0.0.1", 0))
+        lsn.listen(4)
+        port = lsn.getsockname()[1]
+        cli = _sk.create_connection(("127.0.0.1", port), timeout=2)
+        srv, _ = lsn.accept()
+        cnt = {}
+        o_on, o_bytes = _hf.estats_on, _hf.estats_bytes
+
+        def fake_bytes(conn):
+            k = (conn["laddr"], conn["lportn"], conn["raddr"], conn["rportn"])
+            n = cnt.get(k, 0)
+            cnt[k] = n + 1
+            return (n * 100_000, n * 50_000)
+
+        _hf.estats_on = lambda conn: 0
+        _hf.estats_bytes = fake_bytes
+        try:
+            h = _hf.HostFlow(nic_name="")
+            h.estats = True
+            h.MAX_ROWS = 99
+            for _ in range(3):
+                s = h.sample(want_procs=True, proxy_ports={port})
+                _time.sleep(0.2)
+            px = s.get("proxy") or {}
+            good = px.get("down", 0) > 0 and px.get("up", 0) > 0
+            bad_n += not good
+            print(f"[{'ok ' if good else 'FAIL'}] 3. 应用→代理口的回环连接数出经代理字节 "
+                  f"↓{px.get('down', 0):.0f} ↑{px.get('up', 0):.0f} B/s")
+
+            row = [p for p in (s.get("procs") or []) if p.get("px_down") or p.get("px_up")]
+            good = bool(row)
+            bad_n += not good
+            print(f"[{'ok ' if good else 'FAIL'}] 4. 这份字节也记到了进程头上"
+                  f"{'：' + row[0]['name'] if row else ''}")
+
+            h._pxema = [0.0, 0.0]      # 把平滑值清零，只这一帧看增量
+            s2 = h.sample(want_procs=True, proxy_ports={1})
+            px2 = s2.get("proxy") or {}
+            good = (s2.get("proxy_conns") == 0 and not px2.get("down") and not px2.get("up"))
+            bad_n += not good
+            print(f"[{'ok ' if good else 'FAIL'}] 5. 端口不在集合里 → 不算经代理（0 字节）")
+        finally:
+            _hf.estats_on, _hf.estats_bytes = o_on, o_bytes
+            cli.close()
+            srv.close()
+            lsn.close()
     finally:
         server.DISCO.client = orig
 
