@@ -1,6 +1,7 @@
 # FLOW · 流量出口监看
 
 [![release](https://img.shields.io/github/v/release/7icence1Z/flow-tracking?style=flat-square&label=release&labelColor=14171c&color=d99a4e)](https://github.com/7icence1Z/flow-tracking/releases)
+[![npm](https://img.shields.io/npm/v/@7icence1z/flow-tracking?style=flat-square&label=npm&labelColor=14171c&color=cb3837)](https://www.npmjs.com/package/@7icence1z/flow-tracking)
 [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-5fada5?style=flat-square&labelColor=14171c)](#六跑起来)
 [![python](https://img.shields.io/badge/python-3.10%2B-5fada5?style=flat-square&labelColor=14171c)](#六跑起来)
 [![dependencies](https://img.shields.io/badge/dependencies-0%20%28stdlib%29-2f6f6b?style=flat-square&labelColor=14171c)](#六跑起来)
@@ -322,6 +323,7 @@ v2rayN 为了让自己的界面画实时速率曲线，会往生成的配置里�
 - Windows 10 / 11
 - Python 3.10+（**只用标准库**，不需要 `pip install` 任何东西）
 - 已装 Edge 或 Chrome（用来开面板窗口）
+- Node 16+：**只有走 npm 安装时才需要**（见下面第 5 条），仓库直接跑不需要
 
 ### 2. 启动 / 停止
 
@@ -359,6 +361,35 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1 -Stop
 - **它不会调用系统默认浏览器**；没装 Edge/Chrome 会直接报错，而不是退回到"打开一个网页"
 - 想要纯粹的桌面窗口（不带浏览器的任何痕迹）需要 WebView2 外壳，那会引入第三方依赖，
   与"只用标准库"冲突，所以没做
+
+### 5. 从 npm 装（不想 clone 仓库的话）
+
+同一个东西也发到了 npm：`@7icence1z/flow-tracking`（版本跟着 [release](https://github.com/7icence1Z/flow-tracking/releases) 走）：
+
+```powershell
+npm i -g @7icence1z/flow-tracking
+flow                # 打开面板
+```
+
+装的还是这套 Python 标准库代码 + 那个单文件面板，`flow` 只是个翻译参数的壳子：
+
+| 命令 | 作用 |
+|---|---|
+| `flow` | 起采集器 + 开面板窗口 |
+| `flow stop` | 停掉采集器 |
+| `flow admin` | 以管理员身份打开（本机模式才看得见每进程速率，见[§二.1](#1-权限决定粒度唯一需要你做选择的地方)） |
+| `flow --port 7718` | 换端口 |
+| `flow --width 1100 --height 760` | 换窗口尺寸 |
+| `npx @7icence1z/flow-tracking` | 不装全局，跑一次就走 |
+
+`flow` 本身**不会**自动提权：它继承当前 PowerShell 的权限，普通窗口跑就是普通权限（只数连接），
+想看得见每进程速率得用 `flow admin`（弹 UAC）或在一个已提权的窗口里跑 `flow`。
+
+和 clone 仓库跑只有两点差别，其余完全一样：
+
+- npm 包里**不含 `config.json`**，用内置默认值；面板上「＋ 域名」写的是**包目录里的** `config.json`，
+  升级/重装会丢 —— 想长期保存还是 clone 下来用 `start.ps1`
+- 需要 Node 16+（只是搬运，采集与判定仍然是 Python 标准库）
 
 ---
 
@@ -450,6 +481,8 @@ diag.py              诊断探针：网关 / DNS 对比 / 按网卡绑定握手 
 web/index.html       面板（单文件，内联 CSS/JS，手写 SVG 曲线）
 start.ps1            启动器（后台起服务 + 应用窗口打开面板；非管理员会提示怎么升级）
 start.cmd            双击入口（转调 start.ps1）
+package.json         npm 打包信息（包名 @7icence1z/flow-tracking、files 白名单、bin 入口）
+bin/flow.js          npm 的 flow 命令：只把参数翻译给 start.ps1，不含业务逻辑
 config.json          配置
 CHANGELOG.md         变更记录
 docs/panel.png       README 示意图（Clash 结构，演示数据）

@@ -1,0 +1,50 @@
+{
+  "name": "@7icence1z/flow-tracking",
+  "version": "0.1.2",
+  "description": "Windows 小面板：这一刻的流量走直连还是走 VPN、走的哪块网卡、从哪个 IP 出去（纯 Python 标准库，零依赖）",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "vpn",
+    "clash",
+    "mihomo",
+    "v2rayn",
+    "traffic",
+    "bandwidth",
+    "monitor",
+    "windows",
+    "network"
+  ],
+  "homepage": "https://github.com/7icence1Z/flow-tracking",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/7icence1Z/flow-tracking.git"
+  },
+  "bugs": {
+    "url": "https://github.com/7icence1Z/flow-tracking/issues"
+  },
+  "license": "UNLICENSED",
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "bin": {
+    "flow": "bin/flow.js"
+  },
+  "files": [
+    "bin/",
+    "web/",
+    "docs/",
+    "server.py",
+    "providers.py",
+    "hostflow.py",
+    "diag.py",
+    "start.ps1",
+    "start.cmd",
+    "README.md",
+    "CHANGELOG.md"
+  ]
+}
