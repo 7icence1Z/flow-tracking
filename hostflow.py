@@ -16,6 +16,10 @@ Windows 上不用装任何东西就能拿到两样真东西：
   - **以管理员身份启动时**，eStats 可用：对每条已建立连接开统计、1 Hz 差分，
     就能给出和 VPN 那边一样的每进程 ↓↑ 速率曲线（数据来源见 `estats_*`）。
     这时仍然只有 TCP 净荷字节，UDP/QUIC 只体现在网卡总量里。
+  - **经代理 / 不走代理**：客户端不给统计口（v2rayN 关了 `enableStatistics`、Clash 关了 API）时，
+    系统代理模式下应用是连到客户端的本地代理口再出去的 —— 那条回环 TCP 连接上的字节
+    就是隧道字节。`proxy_ports` 传进来，对这些"远端=代理口"的连接做同样的 eStats 差分，
+    就得到经代理；网卡总量减掉它就是不走代理的估算。同理只要管理员，且只解释 TCP。
   - 逐域名归属同理：(Windows 的 DNS 缓存也要管理员) 。开了代理客户端时由它的
     控制器提供，那才是面板的强项。
 
@@ -280,7 +284,13 @@ class HostFlow:
         self._estats_cum = {}           # 进程名 → [收, 发] 累计
         self._enabled = set()           # 已开统计的连接 key
         self._prev = {}                 # key → (发, 收)
+        self._live = set()              # 这一秒还在的连接 key（用来清掉关掉的）
         self._eema = {}                 # 进程名 → [↓, ↑] 速率（带一点平滑）
+        # 经代理：系统代理模式下，应用是连到客户端的本地代理口（回环）再出去的，
+        # 那条回环连接上的字节就是隧道字节 —— 不用客户端开统计口也能数（要管理员）
+        self.proxy_ports = set()        # 本地代理口（10808/10809/7890 …）
+        self._pxema = [0.0, 0.0]        # 经代理 ↓↑ 速率（平滑）
+        self._proxy_cum = {"down": 0.0, "up": 0.0}
 
     def _refresh_procs(self, now):
         if self.proc_fn and now - self.procs_ts > 8:
@@ -298,10 +308,15 @@ class HostFlow:
             return info
         return f"pid {pid}"
 
-    def sample(self, dt_min=0.05, want_procs=False):
+    def sample(self, dt_min=0.05, want_procs=False, proxy_ports=None):
         now = time.time()
         dt = max(dt_min, now - self.ts if self.ts else 1.0)
         self.ts = now
+        if proxy_ports is not None:
+            try:
+                self.proxy_ports = {int(p) for p in proxy_ports}
+            except Exception:              # noqa: BLE001
+                self.proxy_ports = set()
         if want_procs:
             self._refresh_procs(now)
 
@@ -322,34 +337,66 @@ class HostFlow:
         self.cum["up"] += up * dt
 
         conns = tcp_conns()
+        self._live = set()
         # 回环连接（127.x）是本机进程间通信，不是"流量"，别让它霸榜
         established = [c for c in conns
                        if c["state"] == STATE_ESTABLISHED and not c["rip"].startswith("127.")]
+        # 但回环里有一类恰恰是流量：应用 → 客户端本地代理口（10809 之类）。
+        # 系统代理模式下，隧道里的字节全从这些连接上过，数它们就等于数隧道。
+        # 只认"远端是代理口"那一侧的行：同一条连接在表里有两行，代理那一侧的
+        # 远端是随机临时端口，不会混进来。
+        pconns = [c for c in conns
+                  if self.proxy_ports and c["state"] == STATE_ESTABLISHED
+                  and c["rip"].startswith("127.") and c["rport"] in self.proxy_ports]
+        pper = {}                       # 经代理：PID → {down, up} 速率
+        if self.estats and pconns:
+            self._rates(pconns, pper, dt)
+        pxrate = [sum(e["down"] for e in pper.values()),
+                  sum(e["up"] for e in pper.values())]
         rows = []
         if want_procs:
             per = {}
             for c in established:
-                e = per.setdefault(c["pid"], {"n": 0, "remotes": set(), "down": 0.0, "up": 0.0})
+                e = per.setdefault(c["pid"], {"n": 0, "remotes": set(), "down": 0.0, "up": 0.0,
+                                              "px_down": 0.0, "px_up": 0.0})
+                e["n"] += 1
+                e["remotes"].add(c["rip"])
+            for c in pconns:            # 经代理的连接也算它的连接数，只是远端都在本机
+                e = per.setdefault(c["pid"], {"n": 0, "remotes": set(), "down": 0.0, "up": 0.0,
+                                              "px_down": 0.0, "px_up": 0.0})
                 e["n"] += 1
                 e["remotes"].add(c["rip"])
             if self.estats:
                 self._rates(established, per, dt)
+            # 把经代理的字节并进这个进程自己的行：浏览器的 ↓↑ 就是它真正收发的量，
+            # 不能因为"走的是回环"就当成 0（px_* 留一份，用来判断这行主要走哪边）
+            for pid, e in pper.items():
+                t = per.get(pid)
+                if t:
+                    t["px_down"] += e["down"]
+                    t["px_up"] += e["up"]
+                    t["down"] += e["down"]
+                    t["up"] += e["up"]
             for pid, e in per.items():
                 nm = self._name(pid)
                 rows.append({"name": nm, "pid": pid, "conns": e["n"],
                              "remotes": len(e["remotes"]),
                              "sample": sorted(e["remotes"])[0] if e["remotes"] else "",
-                             "down": e["down"], "up": e["up"]})
+                             "down": e["down"], "up": e["up"],
+                             "px_down": e["px_down"], "px_up": e["px_up"]})
             # 同名进程（浏览器多进程）合并
             merged = {}
             for r in rows:
                 m = merged.setdefault(r["name"], {"name": r["name"], "pid": r["pid"], "conns": 0,
                                                   "remotes": 0, "sample": r["sample"],
-                                                  "down": 0.0, "up": 0.0})
+                                                  "down": 0.0, "up": 0.0,
+                                                  "px_down": 0.0, "px_up": 0.0})
                 m["conns"] += r["conns"]
                 m["remotes"] += r["remotes"]
                 m["down"] += r["down"]
                 m["up"] += r["up"]
+                m["px_down"] += r["px_down"]
+                m["px_up"] += r["px_up"]
             for nm, m in merged.items():
                 e = self._eema.setdefault(nm, [0.0, 0.0])
                 e[0] = e[0] * 0.4 + m["down"] * 0.6
@@ -369,13 +416,30 @@ class HostFlow:
                 rows = sorted(merged.values(),
                               key=lambda r: (-r["conns"], -r["remotes"]))[:self.MAX_ROWS]
 
+        for k in [k for k in self._enabled if k not in self._live]:
+            self._enabled.discard(k)
+            self._prev.pop(k, None)
+
         self.last["down"] = self.last["down"] * 0.45 + down * 0.55
         self.last["up"] = self.last["up"] * 0.45 + up * 0.55
         self.last["conns"] = len(established)
+        # 经代理的总量：有管理员 + 知道代理口，就一直给（闲置时自然掉到 0，
+        # 不要忽有忽无，否则面板上的"经代理"那半行会闪）
+        px = None
+        if self.estats and self.proxy_ports:
+            self._pxema[0] = self._pxema[0] * 0.4 + pxrate[0] * 0.6
+            self._pxema[1] = self._pxema[1] * 0.4 + pxrate[1] * 0.6
+            self._proxy_cum["down"] += self._pxema[0] * dt
+            self._proxy_cum["up"] += self._pxema[1] * dt
+            px = {"down": self._pxema[0], "up": self._pxema[1],
+                  "cum_down": self._proxy_cum["down"], "cum_up": self._proxy_cum["up"],
+                  "conns": len(pconns)}
         return {"total": (self.last["down"], self.last["up"]),
                 "cum": dict(self.cum),
                 "conns": len(established),
                 "conns_all": len(conns),
+                "proxy": px,                 # 经代理（None = 拿不到：非管理员 / 没开系统代理）
+                "proxy_conns": len(pconns),
                 "procs": rows,
                 "estats": self.estats,
                 "nic": nic["name"] if nic else "",
@@ -386,11 +450,13 @@ class HostFlow:
 
         只在管理员下走到这里：普通权限 Set 回 5（ACCESS_DENIED），立刻关掉这条路，
         免得每秒白跑几百次系统调用。
+
+        一帧里会被调用两次（普通连接一次、回环代理连接一次），所以"清掉关掉的连接"
+        不在这里做 —— 记进 self._live，由 sample() 在本帧全采完之后统一清。
         """
-        live = set()
         for c in conns:
             key = (c["laddr"], c["lportn"], c["raddr"], c["rportn"])
-            live.add(key)
+            self._live.add(key)
             if key not in self._enabled:
                 rc = estats_on(c)
                 if rc == 5:                    # 没有管理员权限：认命，退回只数连接
@@ -409,10 +475,8 @@ class HostFlow:
             if prev is None:
                 continue
             e = per.get(c["pid"])
-            if not e:
-                continue
+            if e is None:                  # 只会走代理连接的进程（比如刚起来的浏览器）
+                e = per[c["pid"]] = {"n": 0, "remotes": set(), "down": 0.0, "up": 0.0,
+                                     "px_down": 0.0, "px_up": 0.0}
             e["up"] += max(0, cur[0] - prev[0]) / dt
             e["down"] += max(0, cur[1] - prev[1]) / dt
-        for k in [k for k in self._enabled if k not in live]:
-            self._enabled.discard(k)
-            self._prev.pop(k, None)

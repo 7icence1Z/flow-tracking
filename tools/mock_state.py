@@ -1,9 +1,10 @@
 """生成 README 示意图用的演示快照服务（数据全是假的）。
 
-三种模式：
+四种模式：
   python tools\\mock_state.py 7799                 结构：Clash 系（按域名归并）
   set MOCK_XRAY=1 && python tools\\mock_state.py 7799   结构：v2rayN（经代理 / 直连两行）
   set MOCK_HOST=1 && python tools\\mock_state.py 7799   结构：没有代理客户端（按进程数连接）
+  set MOCK_LOOP=1 && python tools\\mock_state.py 7799   结构：客户端在转发、但没开统计口（回环口分账）
 
 然后 headless 截图 http://127.0.0.1:7799/?poll=1
 """
@@ -21,11 +22,12 @@ BOOT = time.time() - 3600 * 2 - 733
 rnd = random.Random(20261111)
 HIST = 120
 XRAY = (os.environ.get('MOCK_XRAY') == '1')
-HOST = (os.environ.get('MOCK_HOST') == '1')
-ELEV = (os.environ.get('MOCK_ELEV') == '1')
+LOOP = (os.environ.get('MOCK_LOOP') == '1')
+HOST = (os.environ.get('MOCK_HOST') == '1') or LOOP
+ELEV = (os.environ.get('MOCK_ELEV') == '1') or LOOP
 
-# 诊断结论的几种样子，截图时用 MOCK_DIAG 选：ok / target / vpn / link / dns / nopx
-DIAG = os.environ.get("MOCK_DIAG", "nopx" if HOST else "target")
+# 诊断结论的几种样子，截图时用 MOCK_DIAG 选：ok / target / vpn / link / dns / nopx / loop
+DIAG = os.environ.get("MOCK_DIAG", "loop" if LOOP else "nopx" if HOST else "target")
 DIAG_CASES = {
     "ok": {"state": "ok", "label": "链路正常", "tun": False,
            "why": "对照、直连、代理三条路都通，没发现异常",
@@ -51,6 +53,13 @@ DIAG_CASES = {
              "why": "面板按网卡统计总流量、按连接数看谁在连谁（chatgpt.com 与 www.baidu.com 的探测照跑，"
                     "只是不归因到 VPN）。逐域名的字节数需要客户端统计口",
              "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 不通（超时）"]},
+    "loop": {"state": "nopx", "label": "客户端在转发（按本地口分账）", "tun": False,
+             "why": "系统代理指向 127.0.0.1:10808，v2rayN 确实在转发；它的统计口没开，"
+                    "但本地代理口上的回环连接能数出经代理字节 ——「经代理」是真数字，"
+                    "「不走代理」是网卡差额（估算）",
+             "evidence": ["系统代理 127.0.0.1:10808（端口属于 v2rayN 的进程）",
+                          "应用→代理口的回环 TCP 连接 6 条（eStats 差分）",
+                          "网卡总量 − 经代理 = 不走代理（估算）"]},
 }
 
 
@@ -186,7 +195,7 @@ def snap(tick):
         out["client"] = {"kind": "none", "name": "", "core": "", "version": "", "api": "",
                          "config": "", "exe": "", "pid": 0, "mode": "", "nodes": 0,
                          "meta": False, "sub": {}}
-        out["path"] = {"active": "direct",
+        out["path"] = {"active": "direct", "brief": "读不到它的流量 · 按网卡统计",
                        "reason": "没检测到代理客户端：按网卡「以太网」统计本机流量，"
                                  "逐域名/逐进程的字节数要客户端统计口或管理员权限才看得到",
                        "sysproxy": {"enable": 0, "server": ""}}
@@ -250,12 +259,62 @@ def snap(tick):
                 out.setdefault("_elev_hist", {})[p["name"]] = [
                     [v, round(v * 0.12)] for v in
                     wave(HIST, p["down"], [30, 62, 92], 4.0 + k * 0.35, p["down"] * 0.08)]
+        if LOOP:
+            # 客户端在转发、但没开统计口：经代理从"应用→本地代理口"的回环连接上数出来。
+            # 数字按网卡峰值摆，免得大盘比某一行还小（示意数据只求自洽）
+            peak = max(TOTAL_H)
+            px_d, px_u = round(peak * 0.70), round(peak * 0.09 * 0.62)
+            out["client"] = {"kind": "xray", "name": "v2rayN", "core": "xray", "version": "25.10.1",
+                             "api": "", "config": "C:\\Users\\me\\v2rayN\\guiConfigs\\config.json",
+                             "exe": "C:\\Users\\me\\v2rayN\\bin\\xray\\xray.exe", "pid": 8840,
+                             "mode": "", "nodes": 214, "updated": t - 240,
+                             "sub": {"kind": "file", "name": "config.json", "updated": t - 240,
+                                     "used": 0, "total": 0, "expire": 0},
+                             "meta": False, "flow": "xray", "metrics": "",
+                             "local": "127.0.0.1:10808"}
+            out["path"] = {
+                "active": "mixed", "brief": "在转发 · 经代理按本地口数，其余按网卡差额",
+                "reason": ("系统代理已开启并指向 127.0.0.1:10808（v2rayN）：它确实在转发，"
+                           "但没给字节统计（统计口没开），所以「经代理」是按本地代理口上的"
+                           "环回连接数的，「不走代理」是网卡差出来的估算"),
+                "sysproxy": {"enable": 1, "server": "127.0.0.1:10808"}}
+            out["tunnel"] = {"up": True, "mode": "", "tun": False, "mixed": "127.0.0.1:10808",
+                             "controller": "", "version": "", "conns": 0,
+                             "download_total": 0, "upload_total": 0}
+            out["node"] = {"name": "🇸🇬 新加坡-02 | IEPL", "server": "sg2.example.net",
+                           "port": 443, "type": "VMESS", "pid": 8840, "changed_at": t - 240,
+                           "ip": "203.0.113.57", "rtt": 210}
+            out["egress"]["vpn_ip"] = "203.0.113.57"
+            out["egress"]["vpn_geo"] = "Singapore"
+            out["host"]["proxy"] = {"down": px_d, "up": px_u}
+            out["host"]["proxy_conns"] = 6
+            # 本地口在听、通道也通：这一路现在是"真的在用"，不是未启用
+            out["probes"]["vpn"] = {"ok": True, "status": 200, "ms": 210, "ts": t - 4,
+                                    "err": "", "kind": "", "body": ""}
+            # 浏览器走代理 → 它的行主要是隧道字节：并进总速率，标出其中经代理多少，染琥珀
+            ch = out["host"]["procs"][0]
+            ch["px_down"], ch["px_up"] = px_d, px_u
+            ch["down"], ch["up"] = px_d + 80_000, px_u + 8_000
+            out["sites"][0].update({"down": ch["down"], "up": ch["up"],
+                                    "px": px_d + px_u, "via": "vpn"})
+            out["_elev_hist"][ch["name"]] = [
+                [v, round(v * 0.11)] for v in
+                wave(HIST, ch["down"], [30, 62, 92], 4.0, ch["down"] * 0.08)]
         out["hist"] = {"total": [[x, round(x * 0.09)] for x in rot(th, i)], "sites": {}}
         out["total"] = {"down": round(tv), "up": round(tv * 0.09)}
+        if LOOP:
+            out["total"] = {"down": max(TOTAL_H), "up": round(max(TOTAL_H) * 0.09)}
     # 分账：网卡总量 = 经代理 + 不走代理（演示数据；真机上后者是两块计数相减）
     td, tu = out["total"]["down"], out["total"]["up"]
     if HOST:
-        out["split"] = {"nic": {"down": td, "up": tu}, "proxy": None, "direct": None}
+        if LOOP:
+            px = out["host"].get("proxy") or {"down": 0, "up": 0}
+            out["split"] = {"nic": {"down": td, "up": tu},
+                            "proxy": dict(px),
+                            "direct": {"down": td - px["down"], "up": tu - px["up"]},
+                            "src": "loop"}
+        else:
+            out["split"] = {"nic": {"down": td, "up": tu}, "proxy": None, "direct": None}
     else:
         nic_d, nic_u = round(td * 1.07), round(tu * 1.25)
         out["split"] = {"nic": {"down": nic_d, "up": nic_u},
