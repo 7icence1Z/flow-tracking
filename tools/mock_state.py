@@ -25,6 +25,8 @@ XRAY = (os.environ.get('MOCK_XRAY') == '1')
 LOOP = (os.environ.get('MOCK_LOOP') == '1')
 HOST = (os.environ.get('MOCK_HOST') == '1') or LOOP
 ELEV = (os.environ.get('MOCK_ELEV') == '1') or LOOP
+# 演示"VPN 关掉之后"：第 N 次请求之后转成直连（曲线上的琥珀段应该留在左边、往左滑出去）
+OFF_AT = int(os.environ.get('MOCK_OFF_AT', '0') or 0)
 
 # 诊断结论的几种样子，截图时用 MOCK_DIAG 选：ok / target / vpn / link / dns / nopx / loop
 DIAG = os.environ.get("MOCK_DIAG", "loop" if LOOP else "nopx" if HOST else "target")
@@ -95,7 +97,7 @@ TOTAL_H = wave(HIST, 2_600_000, [26, 58, 96], 4.4, 60_000)
 SITE_H = {s["label"]: wave(HIST, s["rate"], [26, 58, 96], 3.8, s["rate"] * 0.06) for s in SITES}
 
 
-def snap(tick):
+def snap(tick, off=False):
     t = time.time()
     i = min(HIST - 1, (tick + HIST) % HIST)
     tot = TOTAL_H[i]
@@ -326,6 +328,20 @@ def snap(tick):
     out["diag"] = {**out["diag"], "ts": t - 6}
     if "_elev_hist" in out:
         out["hist"]["sites"] = out.pop("_elev_hist")
+    if off:
+        # 演示"隧道切断了"：判定、探测、分账一起变，曲线上的琥珀段只能靠自己留住
+        out["path"] = {"active": "direct",
+                       "reason": "系统代理已关闭，也没有端口在监听：此刻没有转发证据",
+                       "sysproxy": {"enable": 0, "server": ""}}
+        out["tunnel"]["up"] = False
+        out["probes"]["vpn"] = {"ok": False, "status": 0, "ms": 1200, "ts": t - 4,
+                                "err": "URLError", "kind": "refused", "detail": "", "body": ""}
+        out["diag"] = {**DIAG_CASES["nopx"], "ts": t - 6}
+        out["node"] = {}
+        out["egress"]["vpn_ip"] = ""
+        out["egress"]["vpn_geo"] = ""
+        out["split"] = {"nic": {"down": td, "up": tu}, "proxy": None, "direct": None,
+                        "client": None, "src": ""}
     return out
 
 
@@ -335,7 +351,9 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/api/state"):
-            body = json.dumps(snap(int(time.time() * 2)), ensure_ascii=False).encode()
+            H.hits = getattr(H, "hits", 0) + 1
+            off = bool(OFF_AT and H.hits > OFF_AT)
+            body = json.dumps(snap(int(time.time() * 2), off), ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
         else:

@@ -50,6 +50,14 @@ body{
 .grow{flex:1}
 .clock{display:flex;align-items:baseline;gap:9px;font-family:var(--mono);font-size:10.5px;color:var(--dim-2)}
 .clock b{color:var(--dim);font-weight:500;font-size:11.5px;font-variant-numeric:tabular-nums}
+/* 采集器掉线时别让上一帧的判定继续冒充"现在" */
+.linkstale{
+  font:10.5px/1 var(--mono);color:#dda79f;letter-spacing:.02em;white-space:nowrap;
+  border:1px solid rgba(201,106,95,.42);background:rgba(201,106,95,.10);
+  padding:3px 8px;border-radius:99px;
+}
+body.stale .verdict{opacity:.55}
+body.stale .rates,body.stale .totals{opacity:.7}
 
 h2{margin:0;font-size:11.5px;font-weight:500;color:var(--dim);letter-spacing:.02em}
 .card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px}
@@ -237,6 +245,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       <small id="verdictSub"></small>
     </div>
     <div class="grow"></div>
+    <span class="linkstale" id="linkState" hidden>采集器未连接</span>
     <div class="clock"><b id="clock">--:--:--</b><span id="uptime"></span></div>
   </div>
 
@@ -286,13 +295,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       <div class="rate up"><div class="cap">↑ 上行</div><div class="val"><span id="upRate">0</span><span class="unit" id="upUnit">B/s</span></div></div>
     </div>
     <div class="chart"><span class="scale" id="chartScale">—</span><svg id="mainSpark" viewBox="0 0 100 40" preserveAspectRatio="none">
-      <defs><linearGradient id="gDn" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" style="stop-color:var(--dn);stop-opacity:.13"/>
-        <stop offset="100%" style="stop-color:var(--dn);stop-opacity:0"/>
-      </linearGradient></defs>
       <line x1="0" y1="20" x2="100" y2="20" style="stroke:var(--line)" stroke-width="1" stroke-dasharray="2 4" vector-effect="non-scaling-stroke"/>
-      <path id="dnArea" fill="url(#gDn)" d=""/>
-      <path id="dnLine" fill="none" style="stroke:var(--dn)" stroke-width="1.2" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>
+      <g id="dnPaint"></g>
       <path id="upLine" fill="none" style="stroke:var(--up)" stroke-width="1" stroke-opacity=".85" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>
     </svg></div>
     <div class="totals">
@@ -350,6 +354,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   let bought = 0;
   const rowCache = new Map();
   let lastPing = 0;
+  const pageStart = Date.now();
 
   /* ── 格式化 ── */
   function split(v) {
@@ -360,6 +365,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     return [n >= 10 ? Math.round(n) : +n.toFixed(1), u[i]];
   }
   const fmtRate = v => { const [n, u] = split(v); return [n, u + "/s"]; };
+  // 判定 → 曲线颜色：vpn/mixed 琥珀、direct 青、其它灰（历史按当时判定留色）
+  const toneOf = a => (a === "vpn" || a === "mixed") ? "vpn" : a === "direct" ? "dir" : "dim";
   const fmtBytes = v => { const [n, u] = split(v); return n + " " + u; };
   const fmtMs = ms => (ms == null ? "—" : ms < 0 ? "不通" : ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(2) + " s");
   // 服务端把病因分好了类，这里只负责翻成人话（比显示 URLError 有用得多）
@@ -393,19 +400,73 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     return next;
   }
 
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const TONE = {
+    vpn: ["var(--vpn)", ".11"],   // 走隧道那几秒的琥珀
+    dir: ["var(--dir)", ".10"],   // 直连
+    dim: ["var(--dim-2)", ".05"], // 都不通
+  };
+
+  /* 颜色跟着"那一刻"走，不是跟着"此刻"走。
+     VPN 关掉之后：琥珀不再长新点（新点按当时状态上色），旧点留在原地，
+     窗口继续往前滚，于是那段曲线整体向左移出去 —— 而不是整条线瞬间变色或消失。 */
   function renderMainChart() {
     const h = hist.total;
     if (h.length < 2) return;
     let peak = 0;
     for (const p of h) peak = Math.max(peak, p.d, p.u);
     const max = autoMax("total", peak, 1024);
-    const dser = h.map(p => p.d), user = h.map(p => p.u);
-    const dmax = Math.max(...dser), umax = Math.max(...user);
-    const hasD = dmax > 0, hasU = umax > max * 0.02;
-    $("#dnLine").setAttribute("d", hasD ? buildPath(dser, 100, 40, max, false) : "");
-    $("#dnArea").setAttribute("d", hasD ? buildPath(dser, 100, 40, max, true) : "");
-    $("#upLine").setAttribute("d", hasU ? buildPath(user, 100, 40, max, false) : "");
-    const [pn, pu] = fmtRate(Math.max(dmax, umax));
+    const n = h.length, step = 100 / (n - 1);
+    const yOf = v => (38 - Math.min(1, v / max) * 35.5).toFixed(2);
+
+    // 只有 1 个采样点的孤立色带画不出线，并到邻居那边去（这也是"别拿一帧当结论"）
+    const tones = h.map(p => TONE[p.s] ? p.s : "dim");
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 0; i < n; i++) {
+        if (i > 0 && tones[i] === tones[i - 1]) continue;
+        if (i < n - 1 && tones[i] === tones[i + 1]) continue;
+        if (i > 0) tones[i] = tones[i - 1];
+        else if (i < n - 1) tones[i] = tones[i + 1];
+      }
+    }
+
+    const g = $("#dnPaint");
+    while (g.firstChild) g.removeChild(g.firstChild);
+    let start = 0;
+    while (start < n) {
+      const tone = tones[start];
+      let end = start + 1;
+      while (end < n && tones[end] === tone) end++;
+      if (end - start >= 2) {
+        const [col, alpha] = TONE[tone];
+        let line = "", area = "";
+        for (let i = start; i < end; i++) {
+          const x = (i * step).toFixed(2);
+          const y = yOf(h[i].d);
+          line += (i > start ? "L" : "M") + x + " " + y;
+          area += (i > start ? "L" : "M") + x + " " + y;
+        }
+        const xa = (start * step).toFixed(2), xb = ((end - 1) * step).toFixed(2);
+        const a = document.createElementNS(SVGNS, "path");
+        a.setAttribute("d", area + `L${xb} 38L${xa} 38Z`);
+        a.setAttribute("fill", col);
+        a.setAttribute("fill-opacity", alpha);
+        g.appendChild(a);
+        const l = document.createElementNS(SVGNS, "path");
+        l.setAttribute("d", line);
+        l.setAttribute("fill", "none");
+        l.setAttribute("stroke", col);
+        l.setAttribute("stroke-width", "1.4");
+        l.setAttribute("stroke-linejoin", "round");
+        l.setAttribute("vector-effect", "non-scaling-stroke");
+        g.appendChild(l);
+      }
+      start = end;
+    }
+
+    const user = h.map(p => p.u), umax = Math.max(...user);
+    $("#upLine").setAttribute("d", umax > max * 0.02 ? buildPath(user, 100, 40, max, false) : "");
+    const [pn, pu] = fmtRate(Math.max(peak, umax));
     $("#chartScale").textContent = "峰值 " + pn + " " + pu;
   }
 
@@ -590,9 +651,11 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     lastPing = now;
 
     // 首次拿到快照时用服务端攒的历史打底，面板一打开就有曲线，而不是空等两分钟
+    // （服务端历史不记"当时走哪条路"，打底色按当下的判定，不冒充过去的证据）
+    const toneNow = toneOf((s.path || {}).active);
     if (!hist.seeded && s.hist) {
       hist.seeded = true;
-      const toPairs = a => (a || []).slice(-HIST).map(x => ({ d: x[0], u: x[1] }));
+      const toPairs = a => (a || []).slice(-HIST).map(x => ({ d: x[0], u: x[1], s: toneNow }));
       hist.total = toPairs(s.hist.total);
       for (const k in (s.hist.sites || {})) hist.vpnSites.set(k, toPairs(s.hist.sites[k]));
     }
@@ -690,18 +753,12 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     /* 吞吐：大盘一律是"网卡总量"，因为那才是这台机器真实的流量；
        走没走代理由下面的分账和每一行的标签说清楚 */
     const t = split.nic || s.total || { down: 0, up: 0 };
-    hist.total.push({ d: t.down, u: t.up });
+    hist.total.push({ d: t.down, u: t.up, s: toneOf(active) });
     if (hist.total.length > HIST) hist.total.shift();
     const [dnv, dnu] = fmtRate(t.down);
     const [upv, upu] = fmtRate(t.up);
     $("#dnRate").textContent = dnv; $("#dnUnit").textContent = dnu;
     $("#upRate").textContent = upv; $("#upUnit").textContent = upu;
-    const tint = active === "vpn" || active === "mixed" ? "var(--vpn)"
-      : active === "direct" ? "var(--dir)" : "var(--dim-2)";
-    $("#dnLine").style.stroke = tint;
-    document.querySelectorAll("#gDn stop").forEach((st, i) => {
-      st.style.stopColor = tint; st.style.stopOpacity = i ? "0" : ".14";
-    });
     renderMainChart();
     const tn = s.tunnel || {};
     const hcum = host.cum || { down: 0, up: 0 };
@@ -880,6 +937,20 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
       $("#uptime").textContent = h ? `已运行 ${h}h${String(m).padStart(2, "0")}m` : `已运行 ${m}m`;
     }
+    // 采集器掉线（被 kill / 崩了 / 端口变了）：上一帧的判定不能继续冒充"现在"
+    const silent = Date.now() - (lastPing || pageStart);
+    const stale = silent > (lastPing ? 3500 : 6000);
+    const ls = $("#linkState");
+    if (ls) {
+      ls.hidden = !stale;
+      if (stale) {
+        ls.textContent = lastPing
+          ? "采集器未连接 · 最后 " + new Date(lastPing).toLocaleTimeString("zh-CN", { hour12: false })
+          : "采集器未连接";
+      }
+    }
+    document.body.classList.toggle("stale", stale);
+    if (stale && !lastPing) $("#verdictText").textContent = "没连上采集器";
   }
   setInterval(tickClock, 1000);
   tickClock();

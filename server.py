@@ -609,9 +609,10 @@ class Collector:
             owner = table.get(pid) or {}
             ppid = owner.get("ppid", 0)
             gppid = (table.get(ppid) or {}).get("ppid", 0)
-            if cli.pid and cli.pid in (pid, ppid, gppid):
+            # 缓存里名字/端口归属对得上还不够：PID 得活着（客户端被 kill 之后缓存还在）
+            if cli.pid and cli.pid in (pid, ppid, gppid) and providers._alive(cli.pid):
                 return f"{host}:{port}", f"{cli.name} 的进程在监听它"
-            if providers._stem(owner.get("name", "")) in stems:
+            if providers._stem(owner.get("name", "")) in stems and providers._alive(pid):
                 return f"{host}:{port}", f"{cli.core or cli.name} 内核在监听它"
             # 口在监听，但不是它开的（是别的程序，或端口归属查不到）→ 不当证据
             continue

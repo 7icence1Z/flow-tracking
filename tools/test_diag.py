@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
 
 import diag  # noqa: E402
+import providers  # noqa: E402
 import server  # noqa: E402
 
 
@@ -282,6 +283,28 @@ def main() -> int:
         good = addr == ""
         bad_n += not good
         print(f"[{'ok ' if good else 'FAIL'}] 5. 口不是它开的（别的程序占着）→ 不当证据 ({addr!r})")
+
+        # 缓存里名字对得上、但那个 PID 已经不在了：缓存不能当"它此刻在转发"
+        o_ports, o_table, o_alive = server.DISCO._ports, server.DISCO._table, providers._alive
+        try:
+            server.DISCO.client = types.SimpleNamespace(
+                name="演示客户端", kind="v2ray", core="v2ray", metrics="", api="", flow="",
+                pid=0, local_proxy="")
+            server.DISCO._ports = lambda force=False: {port: 999999}
+            server.DISCO._table = lambda force=False: {999999: {"name": "v2ray.exe", "ppid": 0}}
+            providers._alive = lambda pid: False
+            addr, why = c._forwarding_proxy()
+            good = (addr, why) == ("", "")
+            bad_n += not good
+            print(f"[{'ok ' if good else 'FAIL'}] 6. 缓存里名字对得上、但进程已死 → 不算在转发 ({addr!r})")
+
+            providers._alive = lambda pid: True
+            addr, why = c._forwarding_proxy()
+            good = addr.endswith(f":{port}") and bool(why)
+            bad_n += not good
+            print(f"[{'ok ' if good else 'FAIL'}] 7. 进程还活着 → 才算它内核在转发 ({addr!r}, {why!r})")
+        finally:
+            server.DISCO._ports, server.DISCO._table, providers._alive = o_ports, o_table, o_alive
         lsn.close()
     finally:
         server.DISCO.client = orig

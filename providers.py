@@ -139,6 +139,32 @@ def _stem(name: str) -> str:
     return re.sub(r"\.exe$", "", (name or "").strip().lower())
 
 
+def _alive(pid: int) -> bool:
+    """这个 PID 现在还活着吗。
+
+    进程表 `_table()` 缓存 30 秒、监听表 `_ports()` 缓存 15 秒，缓存比进程活得久：
+    客户端被 kill 掉之后，缓存里还留着它的名字和端口归属。判断"它此刻在转发"
+    必须挂在活着的进程上，否则会出现"进程已经没了，面板还说在走 VPN"。
+    查不到退出码时按"活着"算 —— 宁可少断言，不要冤枉一个可能还在转发的进程。
+    """
+    if not pid or int(pid) <= 0:
+        return False
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1000, False, int(pid))       # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return True
+            return code.value == 259                        # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return True
+
+
 def _lookup(stem: str) -> str:
     """精确名 → 否则前缀匹配（mihomo-windows-amd64 → mihomo）"""
     if not stem:
