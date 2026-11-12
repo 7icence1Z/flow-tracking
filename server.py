@@ -617,22 +617,35 @@ class Collector:
             continue
         return "", ""
 
-    def _proxy_ports(self) -> set:
-        """可能承载"经代理"的本地端口：系统代理口 + 客户端本地口 + 混合口
+    @staticmethod
+    def _port_of(addr) -> int:
+        """"127.0.0.1:7890" / "http=127.0.0.1:10809" 都取末尾端口，取不到给 0"""
+        m = re.search(r":(\d{1,5})\s*$", str(addr or "").strip())
+        return int(m.group(1)) if m else 0
 
-        给 hostflow 用：应用 → 这些端口（回环）的连接上跑的就是隧道字节。
-        端口猜错不要紧 —— 多几个只会让"经代理"少算，不会把直连算成代理。
+    def _proxy_ports(self) -> set:
+        """可能承载"客户端入口"字节的本地端口：只认现在真在用的回环口
+
+        给 hostflow 用：应用 → 这些端口（回环）的连接上跑的是"进客户端"的字节。
+        - 系统代理：只认 ProxyEnable=1 且地址是回环的。关掉之后注册表里残留的地址
+          不算 —— 那个端口可能正被别的程序用着，算进来就把别人的流量记到客户端头上。
+        - 客户端自己的本地口（local_proxy）：有客户端才算；控制器猜的混合口同理。
+        端口猜错不要紧 —— 少算只会让"经客户端"偏小，不会把直连算成走了它。
         """
         cli = DISCO.client
-        blob = " ".join([self.sysproxy.get("server") or "", cli.local_proxy or ""])
-        # 混合口只在"真有客户端在'用代理'"时才加：没客户端时 hostflow 不该去数 7890
-        if self.sysproxy.get("enable") == 1 or cli.local_proxy:
-            blob += " " + (self.proxy or "")
         out = set()
-        for m in re.finditer(r":(\d{1,5})\b", blob):
-            port = int(m.group(1))
-            if 0 < port < 65536:
-                out.add(port)
+        if self.sysproxy.get("enable") == 1:
+            for part in re.split(r"[;,]", str(self.sysproxy.get("server") or "")):
+                addr = part.split("=")[-1].strip()
+                port = self._port_of(addr)
+                if (0 < port < 65536
+                        and addr.startswith(("127.0.0.1:", "localhost:", "[::1]:", "::1:"))):
+                    out.add(port)
+        if cli.local_proxy:
+            for addr in (cli.local_proxy, self.proxy):
+                port = self._port_of(addr)
+                if 0 < port < 65536:
+                    out.add(port)
         return out
 
     def tick_cfg(self):
@@ -700,15 +713,15 @@ class Collector:
             # 管理员权限下 eStats 可用：每进程的 ↓↑ 速率就是真数字，
             # 直接发成"站点行"，UI 用同一套曲线画出来 —— 和 VPN 那边长得一样
             for p in s.get("procs") or []:
-                # 这行的字节已经是"直连 + 经代理"的合计；偏隧道就染成琥珀色，
-                # 一眼能看出哪个进程的流量主要在 VPN 里
+                # 这行的字节是"直连 + 经客户端"的合计。px 只是"进了客户端本地口"的
+                # 那一份（可能被规则直连放出去），所以染成中性色，不冒充"走 VPN"的琥珀
                 pxt = (p.get("px_down") or 0.0) + (p.get("px_up") or 0.0)
                 tot = (p.get("down") or 0.0) + (p.get("up") or 0.0)
                 r = {"key": p["name"], "label": p["name"], "watched": True, "fixed": True,
                      "down": round(p.get("down") or 0), "up": round(p.get("up") or 0),
                      "conns": p.get("conns", 0), "ip": p.get("sample", ""),
                      "chain": "", "rule": "",
-                     "via": "vpn" if (tot > 0 and pxt >= tot * 0.6) else "direct",
+                     "via": "proxy" if (tot > 0 and pxt >= tot * 0.6) else "direct",
                      "px": round(pxt),
                      "remotes": p.get("remotes", 0),
                      "total_down": round(p.get("cum_down") or 0),
@@ -936,16 +949,19 @@ class Collector:
         # 免得上面说"没在转发"、下面又显示着它的名字
         fwd, fwd_why = self._forwarding_proxy() if flow == "host" else ("", "")
         host = self.host_data if flow == "host" else {}
-        # 回环口分账：管理员下 hostflow 能从"应用→本地代理口"的环回连接里
-        # 数出经代理字节，这时本机模式就不是"只能数网卡总量"了
+        cli = DISCO.client
+        # 客户端入口字节：管理员下 hostflow 从"应用→客户端本地口"的回环连接里数出来的。
+        # 它是"进了客户端"的字节，不是"进了隧道"的字节 —— 客户端的规则可能把一部分
+        # 按直连放出去，所以只发 split.client，不拿它冒充经代理/直连（review #1）。
+        # 没有"它确实在转发"或"它自己有本地口"的证据时，这堆字节不归它（review #2）。
         hx = (host.get("proxy") or None) if flow == "host" else None
-        # 空转的"经代理 0"是噪音：没有转发证据、也确实一个字节都没数到，就当没有这一栏
-        if hx and not fwd and not (hx.get("down") or hx.get("up")):
+        if hx and not (fwd or cli.local_proxy):
+            hx = None
+        if hx and not ((hx.get("down") or 0) + (hx.get("up") or 0)):
             hx = None
         self.diag = self._diagnose(probes, link, conns, flow, fwd=fwd, px=bool(hx))
 
         ns = self.nic_data or {}
-        cli = DISCO.client
         brief = ""
         if flow == "host":
             nic = ns.get("nic") or "未知"
@@ -957,12 +973,12 @@ class Collector:
                 # 这时"没在转发"是假话，"全部直连"也不对：显式走系统代理的程序都在隧道里。
                 active = "mixed"
                 if hx:
-                    # 管理员下我们已经从环回连接里数出了经代理字节，说法要跟着变
+                    # 管理员下能数到"进客户端"的字节了，但入口不等于隧道（review #1）
                     reason = (f"{cli.name or '客户端'} 正在转发（系统代理 → {fwd}，{fwd_why}）—— "
                               f"它没给字节统计（{self._why_unreadable(cli)}），"
-                              f"所以「经代理」是按本地代理口上的环回连接数的，"
-                              f"「不走代理」是网卡差出来的估算")
-                    brief = f"{cli.name or '客户端'} 在转发 · 经代理按本地口数，其余按网卡差额"
+                              f"只能数「应用 → 它的本地口」这条回环连接：那是入口字节，"
+                              f"其中多少进了隧道、多少被规则按直连放出去，读不到")
+                    brief = f"{cli.name or '客户端'} 在转发 · 经它的本地口计数，隧道份额未知"
                 else:
                     reason = (f"{cli.name or '客户端'} 正在转发（系统代理 → {fwd}，{fwd_why}），"
                               f"但字节数读不到（{self._why_unreadable(cli)}）—— "
@@ -1012,21 +1028,22 @@ class Collector:
         extras = sorted([r for r in (rows or []) if r["key"].startswith("extra:") and (r["down"] + r["up"]) > 0],
                         key=lambda r: -(r["down"] + r["up"]))[:MAX_EXTRA_ROWS]
 
-        # 分账：网卡总数是真的；"经代理"优先用客户端报的；
-        # 本机模式下没有客户端统计口时，用 hostflow 从环回代理连接里数出来的那份
-        # （src=loop 表示"经代理"也是真数字，只是数的是回环口，不含 UDP/QUIC）；
-        # "不走代理"两种来源都是差值，所以只能当估算看，面板上写"约"
+        # 分账：网卡总数是真的；"经代理"优先用客户端自己报的统计口。
+        # 本机模式下没有统计口时，hostflow 从"应用 → 客户端本地口"的回环连接里
+        # 数出来的是**入口字节**（split.client），不等于走了隧道 —— 客户端的规则
+        # 可能把一部分按直连放出去，所以既不当"经代理"、也不拿它做差算"直连"。
         ntot = ns.get("total") or (0.0, 0.0)
         prox = tuple(total) if (ok and flow != "host") else None
-        src = "api"
-        if ok and flow == "host" and hx:
-            prox = (hx.get("down") or 0.0, hx.get("up") or 0.0)
-            src = "loop"
         split = {"nic": {"down": round(ntot[0]), "up": round(ntot[1])},
                  "proxy": {"down": round(prox[0]), "up": round(prox[1])} if prox else None,
                  "direct": ({"down": max(0, round(ntot[0] - prox[0])),
                              "up": max(0, round(ntot[1] - prox[1]))} if prox else None),
-                 "src": src if prox else ""}
+                 "client": None,
+                 "src": "api" if prox else ""}
+        if ok and flow == "host" and hx:
+            split["client"] = {"down": round(hx.get("down") or 0.0),
+                              "up": round(hx.get("up") or 0.0)}
+            split["src"] = "loop"
 
         ST.publish({
             "ok": ok,
@@ -1223,11 +1240,11 @@ class Collector:
             name = DISCO.client.name
             if fwd:
                 if px:
-                    return out("nopx", "客户端在转发（按本地口分账）",
+                    return out("nopx", "客户端在转发（经本地口计数）",
                                f"系统代理指向 {fwd}，{name} 确实在转发；它的统计口没开"
-                               f"（{self._why_unreadable(DISCO.client)}），但本地代理口上的"
-                               f"回环连接能数出经代理字节 ——「经代理」是真数字，"
-                               f"「不走代理」是网卡差额（估算）",
+                               f"（{self._why_unreadable(DISCO.client)}），"
+                               f"本地代理口上的回环连接能数出「进客户端」的字节，"
+                               f"但那只是入口 —— 其中多少进了隧道、多少按规则直连，读不到",
                                [x for x in ev if not x.startswith("代理通道")])
                 return out("nopx", "客户端在转发，读不到字节数",
                            f"系统代理指向 {fwd}，{name} 确实在转发；但它没给字节统计"

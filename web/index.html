@@ -14,6 +14,7 @@
   --text:#dfe3e8; --dim:#9aa3af; --dim-2:#77808d;
   --accent:#d99a4e; --accent-2:#5d4a30; --bad:#c96a5f;
   --vpn:#d99a4e; --dir:#5fada5; --ok:#5fada5; --ok-2:#3d6266;
+  --prox:#8e97a8;   /* "进了客户端"的入口字节：中性色，不冒充走 VPN 的琥珀 */
   --dn:#dfe3e8; --up:#7d949c;
   --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,"Liberation Mono",monospace;
   --ui:system-ui,-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif;
@@ -155,6 +156,7 @@ h2{margin:0;font-size:11.5px;font-weight:500;color:var(--dim);letter-spacing:.02
 .tag{font-size:9.5px;letter-spacing:.04em;font-weight:500;border:0;padding:0;flex:none;color:var(--dim-2)}
 .tag[data-via="vpn"]{color:#c08b46}
 .tag[data-via="direct"]{color:#4f8d88}
+.tag[data-via="proxy"]{color:#8e97a8}
 .tag[data-via="idle"]{color:var(--dim-2)}
 .site-spark svg{display:block;width:100%;height:18px;overflow:visible}
 .site-nums{display:flex;gap:10px;font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums;
@@ -524,12 +526,15 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       r.b.setAttribute("d", hasU ? buildPath(user, 100, 26, max, false) : "");
 
       const via = s.via || "idle";
-      const hue = via === "vpn" ? "var(--vpn)" : via === "direct" ? "var(--dir)" : "var(--dim-2)";
+      const hue = via === "vpn" ? "var(--vpn)" : via === "direct" ? "var(--dir)"
+        : via === "proxy" ? "var(--prox)" : "var(--dim-2)";
       r.a.style.stroke = hue;
       r.f.style.fill = via === "vpn" ? "rgba(217,154,78,.11)"
-        : via === "direct" ? "rgba(95,173,165,.11)" : "rgba(223,227,232,.05)";
+        : via === "direct" ? "rgba(95,173,165,.11)"
+          : via === "proxy" ? "rgba(142,151,168,.10)" : "rgba(223,227,232,.05)";
       r.tag.dataset.via = via;
-      r.tag.textContent = via === "vpn" ? "VPN" : via === "direct" ? "直连" : "空闲";
+      r.tag.textContent = via === "vpn" ? "VPN" : via === "direct" ? "直连"
+        : via === "proxy" ? "经客户端" : "空闲";
       // 本机模式下每行都是本机进程，"直连/空闲"标签是废话
       r.tag.hidden = hostMode || r.tag.textContent === s.label;
       const [dn, dnu] = fmtRate(s.down);
@@ -543,10 +548,11 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       r.el.title = s.fixed
         ? `${s.label} · 累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`
         : `${s.label} · ${s.conns} 条连接${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}\n累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`;
-      // 本机模式下这行包含"经代理"的字节：说明是哪来的，别让人以为隧道流量漏了
+      // 本机模式下这行有这么一部分是"进了客户端本地口"的：说清来源，
+      // 也别说成"走了隧道"——入口字节里可能有一部分被规则直连放出去
       if (hostMode && s.px > 0) {
-        r.el.title += `\n其中经代理约 ${fmtRate(s.px)[0]} ${fmtRate(s.px)[1]}`
-          + "（数的是它连本地代理口那条回环连接）";
+        r.el.title += `\n其中经过客户端本地口约 ${fmtRate(s.px)[0]} ${fmtRate(s.px)[1]}`
+          + "（数的是它连本地代理口那条回环连接；入口字节，不代表都进了隧道）";
       }
     }
     for (const [key, r] of rowCache) {
@@ -578,8 +584,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     hostBytes = isHost && !!((s.host || {}).estats);
     // 分账：网卡总量 vs 经代理 —— 有客户端时两条路同时看
     const split = s.split || {};
-    const px = split.proxy || null;       // 经代理（客户端报的）
+    const px = split.proxy || null;       // 经代理（客户端统计口报的）
     const dr = split.direct || null;      // ≈ 网卡 − 经代理
+    const pcl = split.client || null;      // 进客户端本地口的字节（不等于隧道，见下）
     lastPing = now;
 
     // 首次拿到快照时用服务端攒的历史打底，面板一打开就有曲线，而不是空等两分钟
@@ -598,8 +605,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const iface = s.iface || {};
     const eg = s.egress || {};
     const probes = s.probes || {};
-    // 本机模式下管理员已经从回环代理口数出经代理字节：措辞可以再确切一步
-    const pxHost = !!((s.host || {}).proxy);
+    // 管理员下从回环口数到了"进客户端"的字节：数据来源以后端发布的 split 为准
+    // （host 对象里不带宽带字段，别再自己猜）
+    const pxHost = !!(split.src === "loop" && pcl);
 
     const vd = $("#verdict");
     vd.dataset.s = active;
@@ -615,7 +623,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       const cliName = (s.client || {}).name || "";
       $("#verdictText").textContent = active === "mixed" ? "部分走 VPN" : "本机直连";
       $("#verdictSub").textContent = p.brief
-        || (cliName ? (pxHost ? `${cliName} · 在转发 · 经代理按本地口数`
+        || (cliName ? (pxHost ? `${cliName} · 在转发 · 经它的本地口计数`
                               : `${cliName} · 读不到它的流量 · 按网卡统计`)
                     : "没检测到代理客户端 · 按网卡统计");
     }
@@ -640,7 +648,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const spServer = String((p.sysproxy || {}).server || "").split(";")[0].replace(/^[a-z]+=/, "");
     const head = isHost
       ? (active === "mixed"
-          ? (pxHost ? `<span class="on">在转发 · 经代理按本地口数</span>`
+          ? (pxHost ? `<span class="on">在转发 · 经本地口计数</span>`
                     : `<span class="on">在转发 · 字节数不可读</span>`)
           : `<span class="off">隧道未承载</span>`)
       : isXray
@@ -718,15 +726,15 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const rate = (o, k) => { const [v, u] = fmtRate((o || {})[k] || 0); return v + " " + u; };
     $("#tpNote").textContent = isHost
       ? (host.nic ? `本机网卡总量 · ${host.nic}` : "本机网卡总量")
-        + (px ? ` · 经代理 ${rate(px, "down")}` : "")
+        + (pcl ? ` · 经客户端 ${rate(pcl, "down")}` : "")
       : (px && dr)
         ? `经代理 ${rate(px, "down")} · 不走代理 ${rate(dr, "down")}`
         : (active === "down" ? "隧道未连接，网卡照数" : "网卡总量");
     $("#tpNote").title = isHost
-      ? ((px && dr)
-        ? `${split.src === "loop" ? "经代理（回环口 eStats，TCP）" : "经代理（客户端统计口）"}：`
-          + `↓${rate(px, "down")} ↑${rate(px, "up")}\n`
-          + `不走代理（估算 = 网卡 − 经代理）：↓${rate(dr, "down")} ↑${rate(dr, "up")}\n`
+      ? (pcl
+        ? `经客户端（回环口 eStats，TCP）：↓${rate(pcl, "down")} ↑${rate(pcl, "up")}\n`
+          + `  这是"应用 → 客户端本地口"的入口字节，其中多少进了隧道、\n`
+          + `  多少被它的规则按直连放出去，客户端不给统计口就分不出来\n`
           + `网卡总量（含 UDP/QUIC）：↓${rate(t, "down")} ↑${rate(t, "up")}`
         : "")
       : `网卡总量（含 UDP/QUIC）：↓${rate(t, "down")} ↑${rate(t, "up")}\n`
@@ -787,7 +795,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     if (route.dual) left += ` · 直连走 ${rd.name || "?"}${rd.ip ? " " + rd.ip : ""}`;
     $("#footLeft").textContent = left;
     $("#footRight").textContent = isHost
-      ? `本机模式 · ${hostBytes ? (px ? "管理员：逐进程速率 + 分账" : "管理员：逐进程速率")
+      ? `本机模式 · ${hostBytes ? (pcl ? "管理员：逐进程速率 + 经客户端字节" : "管理员：逐进程速率")
         : "普通权限：只数连接"}`
         + ` · ${hhmmss(s.ts || Date.now() / 1000)}`
       : `控制器 ${tn.controller || ""} · ${s.ok ? "在线" : "离线"} · ${hhmmss(s.ts || Date.now() / 1000)}`;
