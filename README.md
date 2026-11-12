@@ -1,593 +1,217 @@
 # FLOW · 流量出口监看
 
-[![release](https://img.shields.io/github/v/release/7icence1Z/flow-tracking?style=flat-square&label=release&labelColor=14171c&color=d99a4e)](https://github.com/7icence1Z/flow-tracking/releases)
-[![npm](https://img.shields.io/npm/v/@7icence1z/flow-tracking?style=flat-square&label=npm&labelColor=14171c&color=cb3837)](https://www.npmjs.com/package/@7icence1z/flow-tracking)
-[![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-5fada5?style=flat-square&labelColor=14171c)](#六跑起来)
-[![python](https://img.shields.io/badge/python-3.10%2B-5fada5?style=flat-square&labelColor=14171c)](#六跑起来)
-[![dependencies](https://img.shields.io/badge/dependencies-0%20%28stdlib%29-2f6f6b?style=flat-square&labelColor=14171c)](#六跑起来)
-[![telemetry](https://img.shields.io/badge/telemetry-none-2f6f6b?style=flat-square&labelColor=14171c)](#九隐私)
-
-一个只在本机跑的小面板，回答三个问题：**这一刻的流量走直连还是走 VPN？走的哪块网卡？从哪个 IP 出去？**
-
-当前版本 **v0.1.2** · 变更见 [CHANGELOG.md](CHANGELOG.md) · Windows 10/11 · 只要 Python 3.10+ 标准库
-
-![FLOW 面板](docs/panel.png)
-
-> 示意图里的数据全是我编的：`192.168.1.x` / `203.0.113.x` / `HomeNet-5G` / `Clash Verge` 都是演示值，
-> 不是任何人的真实网络。四张图都由 `tools/mock_state.py` 生成，可复现。
-
-它和"任务管理器看网速"的区别只有一句话：**任务管理器只知道用了多少流量，它知道这些字节最终从哪条路、哪个 IP 出去；
-某个域名走的是隧道还是直连。**
-
-开着 VPN 时**两条路一起看**：网卡总量、经代理多少、不走代理多少同屏显示，站点行按实际出口染成琥珀（隧道）或青色（直连）。
-**没开 VPN 也照样数**：检测不到代理客户端就自动切到本机模式，按网卡统计总量、按连接数看谁在连谁（[§二](#二没开-vpn-的时候本机模式)）。
-**VPN 关掉了也不会再误报**：读不到客户端时就回落成本机模式，红色只留给"说在用、但用不了"。
-
----
-
-## 目录
-
-- [一、面板上有什么](#一面板上有什么)
-- [二、没开 VPN 的时候（本机模式）](#二没开-vpn-的时候本机模式)
-- [三、适配哪些客户端](#三适配哪些客户端自动发现不用配)
-- [四、数据从哪来](#四数据从哪来判定的依据)
-- [五、一句话结论怎么算的](#五一句话结论怎么算的)
-- [六、跑起来](#六跑起来)
-- [七、配置](#七配置configjson)
-- [八、HTTP 接口](#八http-接口)
-- [九、隐私](#九隐私)
-- [十、目录结构](#十目录结构)
-- [十一、排障](#十一排障)
-- [十二、边界](#十二边界重要)
-- [十三、版本、自检与变更](#十三版本自检与变更)
-
----
-
-## 一、面板上有什么
-
-### 1. 顶部判定（一句话结论）
-
-| 判定 | 什么时候出现 |
-|---|---|
-| **走 VPN** | 系统代理开着且指向客户端本地端口；或 TUN 已接管全部流量 |
-| **部分走 VPN** | 客户端在跑，但系统代理没开（或它不暴露控制器）—— 只有自己显式配了代理的程序走隧道 |
-| **直连** | 系统代理没开、TUN 没接管，路由层面就是直接出去 |
-| **本机直连** | 连代理客户端都没检测到 —— 不归因到 VPN，只按网卡数本机流量 |
-| **隧道读不到** | 客户端在跑，但控制器和本地代理口都连不上（多半是没连节点），此时按本机模式继续数 |
-
-副标题是关键坐标（`JP 东京-01 · 203.0.113.24` = 节点 + 隧道出口 IP），下面一行灰字写判定依据，
-比如"系统代理已开启并指向 127.0.0.1:7890（mihomo rule 模式），代理感知型应用全部经隧道转发"。
-
-判定是**读状态得出的**，不是猜：系统代理开关来自注册表，模式/TUN 来自控制器 API，客户端身份来自端口归属与进程表。
-
-### 2. 出口路径（两条泳道）
-
-```
-VPN  代理隧道   本机 ── 网卡 ── 节点 ── 出口        承载 17 条 · rule · TUN 关 · 96ms
-直连 不经代理   本机 ── 网卡 ── 出口              目标不通 · 对照 58 ms
-```
-
-- **VPN 泳道**：本机 IP → 实际承载隧道的网卡 → 客户端当前在用的节点 → 隧道出口公网 IP
-- **直连泳道**：本机 IP → 直连走的那块网卡 → 直连出口公网 IP；
-  右上角"目标不通 + 对照 58ms"是**反证**：同一个目标直连不通、国内对照点 58ms 通，
-  说明"网是好的，只是这个目标需要代理"，而不是"网卡坏了"
-- **网卡是按内核路由判的**：拿目标地址 `connect()` 一次，看内核给我选哪个源地址，再反查成网卡名 ——
-  不是按网卡名、也不是按默认路由猜
-- 没有客户端时，VPN 泳道整条变灰、写 `隧道未启用`，不装成一条"待测"的假泳道
-
-两块网卡不一样时（有线打隧道、Wi-Fi 走直连），两条泳道会显示不同网卡，页脚还会写一句 `直连走 WLAN 192.168.1.88`。
-双上行是最容易被忽略的状态，也是"为什么某个程序很慢"的常见答案。
-
-### 3. 实时吞吐（含分账）
-
-1 秒一帧，画 120 秒内的 ↓↑ 曲线，配本次累计和连接数。
-
-大盘的数是**这块网卡的总量**（`GetIfTable2` 读的 `InOctets/OutOctets`），也就是这台机器这秒真的进出去了多少字节
-—— 包括不走代理的程序、系统更新、UDP/QUIC。旁边写的是**分账**：
-
-```
-经代理 121 KB/s · 不走代理 8.5 KB/s
-```
-
-- **经代理**：客户端自己报的字节（Clash 系 = 连接表求和，v2rayN = `stats.outbound.proxy`），精确
-- **不走代理**：网卡总量 − 经代理。差值法，**是估算**（含 UDP/QUIC 的帧开销，可能略偏大）
-
-所以开着 VPN 的时候，两条路的流量同时都在：站点卡里琥珀色行是走隧道、青色行是直连，
-两条泳道右上角也各挂着各自的实时速率。鼠标停在分账那行上能看到 ↓↑ 各自的三个数。
-
-> 网卡总量含局域网拷贝，这是它的物理口径；想只看"出去上网的字节"就看分账那一行。
-
-### 4. 通道探测
-
-每 10 秒，分别从**代理通道**和**直连通道**访问同一个目标（默认 ChatGPT），给出状态码和耗时；
-最下面一条刻度是最近 96 次探测的健康记录，失败标红。第三行"直连对照"打的是国内站点，
-用来把"目标不通"和"网络不通"分开。
-
-失败时那一栏显示的是**病因**（`DNS 解析失败` / `连接被拒绝` / `连接被重置` / `超时` / `TLS 握手/证书错误` /
-`网络不可达` / `绑不上这块网卡`），不是 `URLError` 这种敷衍的词；原始错误在 `title` 里。
-
-没有代理客户端时，"代理通道"显示 `未启用`（灰）—— 这条路本来就不存在，不是故障。
-
-### 5. 诊断结论（这次到底该怀疑谁）
-
-卡片右上角那句话不是标题，是**由证据算出来的结论**：连不上时直接告诉你是 Wi-Fi / 网线断了、DNS 坏了、
-还是 VPN 自己的事。鼠标停上去能看到支撑它的那几条证据（`对照 www.baidu.com 通 40ms`、
-`直连 chatgpt.com 不通（超时）`、`代理通道 不通（超时）`）。完整规则见[第五节](#五一句话结论怎么算的)。
-
-### 6. 站点
-
-按域名归并的实时速率（↓↑）+ 走的是 VPN 还是直连，行的颜色跟着实际出口走（琥珀=VPN、青=直连）。
-底部一行是其余正在跑流量的域名（最多 4 个），**点一下 ＋ 就把它加到监测列表**。
-
-> 客户端不暴露连接表时（比如 v2rayN），这一栏变成"经代理 / 直连"两行**出口级**流量，`＋ 域名` 自动收起 ——
-> 没有逐域名数据就明说没有，不拿总数去凑一个域名。见[第三节](#三适配哪些客户端自动发现不用配)。
-
-### 7. 自己加要盯的域名
-
-右上角「＋ 域名」→ 敲 `github.com` 回车即生效（写回 `config.json`，重启还在）。
-随手贴 `https://www.github.com/path` 也行，会自动取成 `github.com`。
-鼠标移到站点行上，右侧出现 `×`，点掉就不再盯它。
-写错了在底部弹一行提示（`看起来不是个域名`），不会污染配置。
-
-### 8. 没开 VPN 的时候
-
-见[第二节](#二没开-vpn-的时候本机模式)。
-
----
-
-## 二、没开 VPN 的时候（本机模式）
-
-不开 VPN 也要能看流量 —— 否则这东西只在出问题时才有用。检测不到代理客户端（没系统代理、没 TUN、
-没 Clash 控制器）时自动切成**本机模式**，判定写 `本机直连`：
-
-![本机模式（没有代理客户端）](docs/panel-host.png)
-
-能给的：
-
-- **网卡总量**：真实的全机 ↓↑ 速率与累计（同一套 `GetIfTable2` 计数，一直没停过）
-- **谁在连谁**：已建立的 TCP 连接按进程归并 —— 进程名、连接数、远端 IP 个数，点开行有示例远端 IP；
-  回环连接（127.x）剔掉，省得每个程序都在跟本地服务"聊天"
-- **连接总数**：`连接 118`
-
-### 1. 权限决定粒度（唯一需要你做选择的地方）
-
-**以管理员身份启动时**再上一层：给每条已建立连接开内核 eStats（`SetPerTcpConnectionEStats`），
-1 Hz 差分出**每个进程真实的 ↓↑ 速率**。于是「进程」这张表和 VPN 那边的「站点」表长得一模一样 ——
-有曲线、有速率、有累计：
-
-![本机模式 · 管理员权限（每进程速率）](docs/panel-host-admin.png)
-
-| | 普通权限（现状不变） | 管理员 |
-|---|---|---|
-| 网卡总量 / 连接数 / 谁在连谁 | ✅ | ✅ |
-| 每个进程的 ↓↑ 速率与曲线 | ❌ 只数连接 | ✅ 内核 eStats 差分（TCP 净荷） |
-| 「进程」卡右上角 | `只数连接 · 不数字节（要管理员权限）` | `按进程归并 · 1s 采样 · 管理员权限` |
-| 页脚 | `本机模式 · 普通权限：只数连接` | `本机模式 · 管理员：逐进程速率` |
-
-升级方式：右键 `start.cmd` → **以管理员身份运行**（采集器随窗口一起提升权限，不需要改任何配置）。
-普通权限下 eStats 返回 5(`ACCESS_DENIED`) 时面板**立刻退回只数连接**：不重试、不报错、不编数字 ——
-这条降级路径有自检（`tools/test_estats.py`）。
-
-给不了的（**权限决定的，不是没写**）：
-
-- 普通权限下**逐进程/逐域名的字节数**拿不到：内核 eStats 与 DNS 缓存反查都要管理员
-  （实测：eStats 回 5、`ipconfig /displaydns` 直接要提升）
-- 即便有管理员，eStats 也只数 **TCP 净荷**：UDP/QUIC 的字节只体现在网卡总量里；
-  逐域名归属仍然要靠代理客户端的控制器（那才是面板的强项）
-- 于是"哪个程序吃了 5 MB"这种问题：管理员下"哪个进程"能答，"哪个域名"还不一定
-
-### 2. 客户端在跑、但没连节点
-
-点过"断开"、或节点没选上时，软件还开着、本地代理口和控制器却都连不上。这种情况以前会被当成
-"隧道异常"一直红着 —— 现在判定回落成 `本机直连`，理由写
-`⟨客户端⟩ 在跑，但读不到它的流量（没连节点，或控制器没开）`，网卡速率与连接数照数不误。
-软件整个关掉时，面板会把它从客户端列表里清掉，不会继续去问一个不存在的控制器。
-
----
-
-## 三、适配哪些客户端（自动发现，不用配）
-
-### 1. 发现流程
-
-面板不认死某一家软件。启动后它自己走这条链：
-
-1. **谁在监听**：`netstat -ano` 拿本机监听端口 → 端口归属哪个 PID
-2. **是不是 Clash 系**：对这些端口探 `GET /version`，能回 `{"version": …}` 的就是 **Clash REST API**
-   （mihomo / Clash Verge / ClashX Meta / Mihomo Party / FlClash / sing-box 的 `clash_api` 都符合）
-3. **配置在哪**：读内核进程命令行，抠 `-f / -c / --config / -d`；抠不到就按约定猜
-   （`guiConfigs/config.json`、`config.json`、`profiles/*.yaml` 之类）
-4. **解析配置**：`proxies:`（YAML）/ `outbounds`（JSON）→ 节点表、节点数、内容指纹；
-   Xray 系还多认两样：`metrics.listen`（统计口）和 `inbound` 里的本地代理口
-5. **确认还活着**：每一步都带存活校验；客户端退出后身份会被清空，不会对着空气报错
-
-全程只读，不改任何系统/代理配置。
-
-### 2. 支持矩阵
-
-| 客户端 | 怎么认 | 判定 | 节点名 | 逐条连接 | 字节流量 |
-|---|---|---|---|---|---|
-| Clash Verge / Mihomo Party / FlClash / Clash for Windows / 自编译 mihomo / 机场定制客户端 | Clash API + 配置 | ✅ | ✅ | ✅ | ✅ 按域名 |
-| sing-box（开了 `clash_api`） | Clash API + JSON 配置 | ✅ | ✅ | ✅ | ✅ 按域名 |
-| **v2rayN（Xray 内核）** | 进程 + 它生成的 `guiConfigs/config.json` + 统计口 | ✅ | ✅ 读 `guiNDB.db` 的备注 | ❌ 内核不提供 | ✅ **按出口**（经代理 / 直连） |
-| 其它 Xray 壳（NekoRay、自写启动器） | 进程 + 配置 | ✅ | 认不到就显示地址 | ❌ | 有统计口才有 |
-| WireGuard / OpenVPN / 深信服 / Tailscale | 进程 + 网卡 | ✅ | ❌ | ❌ | ❌ 只有网卡与出口 |
-| 没见过的客户端（比如只叫 `proxy.exe`） | 进程名 | ✅ | ❌ | 看它是不是 Clash 系 | 同上 |
-| **什么都没开**（没客户端、没系统代理、没 TUN） | 上面的都不成立 | ✅ 本机直连 | ❌ | ✅ 按进程数连接 | ✅ 网卡总量；管理员下 + 每进程速率 |
-
-**四种可见度，面板会如实告诉你现在是哪一种**：
-
-- **连接级**（Clash 系）：知道每条连接走没走代理、走了哪个节点、属于哪个域名 —— 站点卡按域名
-- **出口级**（v2rayN / Xray）：只知道"经代理的字节"和"直连的字节"各多少 —— 站点卡按出口
-- **只有网卡**（WireGuard 等）：只有出口 IP 和网卡判定，站点卡空着并说明原因
-- **本机级**（没开 VPN）：网卡总量 + 谁在连谁 —— 站点卡变成"进程"；
-  普通权限只数连接，**管理员权限下再给每进程的 ↓↑ 速率**（内核 eStats，TCP 净荷）
-
-### 3. v2rayN 是怎么拿到流量的
-
-v2rayN 为了让自己的界面画实时速率曲线，会往生成的配置里写 `stats: {}`、
-`policy.system.statsOutboundUplink/Downlink = true` 和 `metrics.listen = 127.0.0.1:<端口>`
-（见它源码里的 `V2rayStatisticService` / `CoreConfigV2rayService`）。
-
-那个统计口是个普通 HTTP 服务，`GET /debug/vars` 回来的 JSON 里就有每个 outbound 的累计字节：
-
-```json
-{"stats": {"outbound": {"proxy":  {"uplink": 7000000, "downlink": 88000000},
-                        "direct": {"uplink":  300000, "downlink":  2100000}}}}
-```
-
-面板对它做 1 Hz 差分，就得到"经代理 / 直连"两条精确曲线。
-**精确到字节，但粒度是出口不是域名** —— Xray 不暴露连接表，这一点没得商量。
-
-同一块面板在 v2rayN 下的样子（站点卡换成两行出口级流量，`＋ 域名` 收起）：
-
-![v2rayN 结构下的面板](docs/panel-xray.png)
-
-> 示意图，数据同样是编的。
-
-节点名同理：v2rayN 把备注存在 `guiConfigs/guiNDB.db`（SQLite）里，
-面板拿当前 outbound 的 `地址:端口` 去反查 `remarks`，读不到就退回显示地址。
-读库是只读打开（`mode=ro` + `query_only`），2 分钟一次，不锁它的文件。
-
-### 4. 节点名与订阅
-
-**节点一栏显示的是这家软件自己的叫法**（`🇯🇵 东京-01`、`SG-02`），不是 IP。
-三级回退：控制器 `now`（GLOBAL / 各 Selector 投票）→ 连接链里的配置名 → 出口 IP 反查配置里的 `server`。
-
-**订阅更新**：Clash 系直接读 `/providers/proxies`，拿订阅名、上次更新时间、已用流量、到期时间；
-把订阅拉平成一个大 yaml 的客户端，则盯配置文件的内容指纹 —— 节点表一变，
-"订阅 X 分钟前更新"立刻刷新，节点名也重新解析。
-
----
-
-## 四、数据从哪来（判定的依据）
-
-| 事实 | 来源 |
-|---|---|
-| 系统代理开关 / 地址 | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 的 `ProxyEnable` / `ProxyServer` |
-| 客户端是谁、控制器在哪 | `netstat` 端口归属 + WMI 进程表；控制器地址自动发现，`config.json` 里的只是提示 |
-| 什么模式、TUN 开没开、节点表 | 控制器 `/configs`、`/version`，加上内核命令行指向的配置文件 |
-| 当前节点叫什么 | 控制器 `now`（GLOBAL / Selector 投票）→ 连接链；问不到就用出口 IP 反查配置里的 `server` |
-| 每条连接走没走代理、走了哪个节点 | `/connections` 的 `chains`（`DIRECT` = 直连） |
-| 每个域名的实时速率 | 对 `/connections` 里每条连接的累计字节做 1 Hz 差分，按 `metadata.host` 归并 |
-| 经代理 / 直连各多少字节（v2rayN） | Xray 的 `GET /debug/vars` → `stats.outbound[tag]`，同样 1 Hz 差分 |
-| Xray 统计口在哪 | 它自己生成的 `config.json` 里的 `metrics.listen`，不用你填 |
-| 网卡总量（↓↑ 字节、累计） | `GetIfTable2` 读 `InOctets` / `OutOctets`，1 Hz 差分；每帧都采，不管有没有客户端 |
-| 不走代理的流量 | 网卡总量 − 客户端报的经代理字节（1 Hz 差值，估算） |
-| 谁在连谁（本机模式） | `GetExtendedTcpTable(TCP_TABLE_OWNER_PID_ALL)` → 状态 + 五元组 + PID，按进程名归并，剔掉回环 |
-| 每个进程的 ↓↑ 速率（本机模式 · 管理员） | `SetPerTcpConnectionEStats` 给每条已建立连接开统计，`GetPerTcpConnectionEStats` 拿 `DataBytesIn/Out`，1 Hz 差分后按 PID→进程名归并；普通权限回 5 就退回只数连接 |
-| 是不是管理员 | `IsUserAnAdmin`（决定 eStats 这条路开不开） |
-| 隧道出口 IP | 经客户端的**本地代理口**访问 `ip-api.com`（120 秒一次）；代理口从配置里读（Clash 系 7890、v2rayN 常见 10808） |
-| 直连出口 IP | 绕过代理访问 `ip-api.com`（300 秒一次） |
-| 走的哪块网卡 | `socket.connect()` 问内核"去这个目的地选哪个源地址"，再反查网卡 |
-| Wi-Fi 细节（SSID / 频段 / 信号 / 速率） | `netsh wlan show interfaces`（中英文系统都能解析） |
-| 网卡地址 / 网关 / 接口度量 | `netsh interface ipv4 show addresses` |
-| 网关通不通 | `ping -n 1 -w 900 <网关>`，只看退出码（不解析输出，中英文系统都稳） |
-| 域名解析对不对 | 系统解析器一次 + 直接 UDP 问公共 DNS（`223.5.5.5`）一次；两边给出的地址不一致就标"疑似污染" |
-| 某块网卡单独通不通 | 把源地址绑到那块网卡再 `connect()` 目标的 443 —— 带源地址的连接会按该地址选路由，测的是这块网卡自己的路 |
-| 连不上的原因 | 异常归类成 DNS / 拒绝 / 重置 / 超时 / 不可达 / TLS，面板显示中文而不是 `URLError` |
-
-所有采集都在本机完成。唯一的外网请求是**出口 IP 探测**（`ip-api.com`）、**通道探测**（你配的那个目标）、
-以及诊断用的**网关 ping** 与**公共 DNS 查询**（只问域名，不带任何身份）。
-
----
-
-## 五、一句话结论怎么算的
-
-判定不是标题，是**排除法**：从底层往上排优先级，越底层的问题越先报 —— 链路断了的时候，"VPN 连不上"只是症状。
-
-| 结论（颜色） | 判定依据 | 该干什么 |
-|---|---|---|
-| **链路正常**（青） | 对照、直连、代理三条路全通 | 没事 |
-| **目标被墙，代理正常**（琥珀） | 对照和代理都通，只有直连目标不通 | 不用管，这是设计意图 |
-| **目标需要进出隧道**（琥珀） | TUN 已接管全部流量，直连探测其实也走了隧道 | 不用管，通不通都正常 |
-| **⟨网卡⟩ 链路不通**（红） | 连对照片都打不开，且这块网卡的网关 ping 不回 | 查网线 / Wi-Fi / 路由器 |
-| **DNS 解析有问题**（红） | 网关响应正常，但对照片的域名解析不出来 | 换 DNS，检查 DNS 设置 |
-| **链路通、外面不通**（红） | 网关通、域名也解析得出，对照片照样连不上 | 运营商或站点侧的问题 |
-| **VPN 本地代理口没开**（红） | `127.0.0.1:7890` 拒绝连接或超时，且代理通道也打不开 | 客户端没启动 / 没开系统代理 / 端口改了 |
-| **代理口被占，不是客户端**（红） | 端口能连上但拒绝转发，而且没发现代理客户端 | 有别的程序占了这个端口，换端口 |
-| **VPN 没连上节点**（灰） | 代理口通、客户端在跑，但隧道里 0 条连接 | 选个节点或点"连接"，这格会自己变绿 |
-| **VPN 拒绝连接**（红） | 端口开着，客户端也在，但把请求拒了 | 客户端在跑但没准备好，或端口改了 |
-| **⟨隧道网卡⟩ 链路不通**（红） | 代理通道失败，且隧道所在网卡的网关不响应 | 先修链路，VPN 只是症状 |
-| **代理侧 DNS 失败**（红） | 请求已到隧道，但域名在隧道里解析不出来 | 看节点 DNS 配置 |
-| **VPN 隧道/节点异常**（红） | 链路和代理口都正常、隧道里也有连接，经隧道出去还是打不通 | 换节点、看订阅、看节点 DNS |
-| **没在走隧道 / 没有代理客户端，只看本机流量**（灰） | 客户端在读不到、或压根没检测到客户端 | 没事，面板按网卡继续数（见第二节） |
-
-颜色的规矩很简单：**红色只留给"说在用，但用不了"**；"现在没在用隧道"一律中性灰，不吓人。
-
----
-
-## 六、跑起来
-
-### 1. 要求
-
-- Windows 10 / 11
-- Python 3.10+（**只用标准库**，不需要 `pip install` 任何东西）
-- 已装 Edge 或 Chrome（用来开面板窗口）
-- Node 16+：**只有走 npm 安装时才需要**（见下面第 5 条），仓库直接跑不需要
-
-### 2. 启动 / 停止
+<p align="center">
+  <a href="https://github.com/7icence1Z/flow-tracking/releases"><img alt="release" src="https://img.shields.io/github/v/release/7icence1Z/flow-tracking?style=flat-square&label=release&labelColor=14171c&color=d99a4e"></a>
+  <a href="https://www.npmjs.com/package/@7icence1z/flow-tracking"><img alt="npm" src="https://img.shields.io/npm/v/@7icence1z/flow-tracking?style=flat-square&label=npm&labelColor=14171c&color=cb3837"></a>
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-5fada5?style=flat-square&labelColor=14171c">
+  <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-5fada5?style=flat-square&labelColor=14171c">
+  <img alt="deps" src="https://img.shields.io/badge/deps-0%20%C2%B7%20stdlib-2f6f6b?style=flat-square&labelColor=14171c">
+  <img alt="telemetry" src="https://img.shields.io/badge/telemetry-none-2f6f6b?style=flat-square&labelColor=14171c">
+</p>
+
+一个只在本机跑的小面板：**这一刻的流量走直连还是走 VPN、走的哪块网卡、从哪个 IP 出去。**
+
+两条路一起数（网卡总量 / 经代理 / 不走代理），站点按实际出口染色；没开 VPN 也按网卡和进程继续数。
+Windows 10/11 · Python 标准库 · 零依赖 · 无遥测 · 当前 **v0.1.2**（[CHANGELOG](CHANGELOG.md)）
+
+## 安装
 
 ```powershell
-# 双击 start.cmd 也行
-powershell -ExecutionPolicy Bypass -File .\start.ps1
-
-# 关掉采集器
-powershell -ExecutionPolicy Bypass -File .\start.ps1 -Stop
+npm i -g @7icence1z/flow-tracking     # 需要 Node 16+（只负责搬运）
+flow                                   # 起采集器 + 打开面板
 ```
-
-`start.ps1` 会：后台用 `pythonw` 拉起 `server.py`（无控制台窗口）→ 等端口就绪 →
-用 Edge（没有就 Chrome）的 `--app=` **应用窗口模式**开一扇 800×630 的窗口。
-
-参数：
-
-| 参数 | 作用 |
-|---|---|
-| `-Stop` | 停掉采集器（窗口自己关掉即可） |
-| `-Port` | 换端口（默认 7717），会用 `FLOW_PORT` 传给采集器，窗口打开的地址也跟着换 |
-| `-Width` / `-Height` | 窗口尺寸（默认 800×630） |
-| `-DefaultProfile` | 用你日常浏览器的 profile（默认用仓库里的 `.app-profile/` 独立 profile） |
-
-### 3. 普通权限还是管理员
-
-普通权限全功能可用（判定、泳道、出口 IP、诊断、VPN 侧的逐域名速率都正常）——
-**只有"没开 VPN 时的逐进程速率"需要管理员**（内核 eStats），原因与差别见[§二.1](#1-权限决定粒度唯一需要你做选择的地方)。
-不是管理员时 `start.ps1` 会打一行提示，告诉你右键「以管理员身份运行」能多看到什么。
-
-### 4. 关于那扇窗口
-
-- **没有地址栏、没有标签页、没有书签栏**，标题和任务栏图标都是面板自己的
-- 用独立 profile，**不碰你日常浏览器的登录态和历史**；`.app-profile/` 已进 `.gitignore`
-- 窗口已经开着时，再跑一次 `start.ps1` 不会开第二扇
-- **它不会调用系统默认浏览器**；没装 Edge/Chrome 会直接报错，而不是退回到"打开一个网页"
-- 想要纯粹的桌面窗口（不带浏览器的任何痕迹）需要 WebView2 外壳，那会引入第三方依赖，
-  与"只用标准库"冲突，所以没做
-
-### 5. 从 npm 装（不想 clone 仓库的话）
-
-同一个东西也发到了 npm：`@7icence1z/flow-tracking`（版本跟着 [release](https://github.com/7icence1Z/flow-tracking/releases) 走）：
-
-```powershell
-npm i -g @7icence1z/flow-tracking
-flow                # 打开面板
-```
-
-装的还是这套 Python 标准库代码 + 那个单文件面板，`flow` 只是个翻译参数的壳子：
 
 | 命令 | 作用 |
 |---|---|
-| `flow` | 起采集器 + 开面板窗口 |
-| `flow stop` | 停掉采集器 |
-| `flow admin` | 以管理员身份打开（本机模式才看得见每进程速率，见[§二.1](#1-权限决定粒度唯一需要你做选择的地方)） |
-| `flow --port 7718` | 换端口 |
-| `flow --width 1100 --height 760` | 换窗口尺寸 |
-| `npx @7icence1z/flow-tracking` | 不装全局，跑一次就走 |
+| `flow` / `flow stop` | 起 / 停采集器 |
+| `flow admin` | 以管理员打开 —— **只有管理员**才看得见每进程速率；`flow` 本身不提权 |
+| `flow --port 7718` | 换端口（默认 7717） |
+| `npx @7icence1z/flow-tracking` | 不装全局，跑一次 |
 
-`flow` 本身**不会**自动提权：它继承当前 PowerShell 的权限，普通窗口跑就是普通权限（只数连接），
-想看得见每进程速率得用 `flow admin`（弹 UAC）或在一个已提权的窗口里跑 `flow`。
+不想用 npm 就直接跑（连 Node 都不需要）：
 
-和 clone 仓库跑只有两点差别，其余完全一样：
-
-- npm 包里**不含 `config.json`**，用内置默认值；面板上「＋ 域名」写的是**包目录里的** `config.json`，
-  升级/重装会丢 —— 想长期保存还是 clone 下来用 `start.ps1`
-- 需要 Node 16+（只是搬运，采集与判定仍然是 Python 标准库）
-
----
-
-## 七、配置（`config.json`）
-
-```json
-{
-  "port": 7717,
-  "controller": "127.0.0.1:7892",
-  "mixed_port": "127.0.0.1:7890",
-  "sites": ["chatgpt.com", "openai.com"],
-  "probe_interval": 10,
-  "probe_target": "https://chatgpt.com/",
-  "control_target": "https://www.baidu.com/"
-}
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1        # 或者双击 start.cmd
+powershell -ExecutionPolicy Bypass -File .\start.ps1 -Stop
 ```
+
+前提：Python 3.10+（只用标准库）、装了 Edge 或 Chrome。窗口是 `--app=` 模式（没有地址栏和标签页），
+用独立 profile，不碰你日常浏览器；已经开着时不会再开第二扇。
+`start.ps1` 另有 `-Port` / `-Width` / `-Height` / `-DefaultProfile`。
+
+**想要每进程速率**：`flow stop` 之后 `flow admin`（或右键 `start.cmd` → 以管理员身份运行）。
+已经有个非管理员采集器在跑时，提权那次不会接管它 —— 必须先停。原因见[「没开 VPN 的时候」](#没开-vpn-的时候)。
+
+![FLOW 面板](docs/panel.png)
+
+> 图里数据全是编的（`192.168.1.x` / `203.0.113.x` / `HomeNet-5G` / `Clash Verge`），由 `tools/mock_state.py` 生成，可复现。
+
+## 面板上有什么
+
+- **顶部判定**：走 VPN / 部分走 VPN / 直连 / 本机直连 / 隧道读不到；副标题是节点 + 隧道出口 IP，小字写判定依据（系统代理注册表、控制器模式、客户端身份）
+- **两条泳道**：本机 IP → 网卡 → 节点 → 出口。网卡按内核路由判（拿目标地址 `connect()` 看它给的源地址），不是按网卡名猜；右侧挂实时速率和 `承载 17 条 · rule · TUN 关`
+- **实时吞吐 + 分账**：1 秒一帧、120 秒曲线。大盘是**网卡总量**（`GetIfTable2`），旁边写 `经代理 121 KB/s · 不走代理 8.5 KB/s` —— 后者是差值**估算**（含 UDP/QUIC 帧开销）
+- **通道探测**：代理 / 直连打同一个目标 + 国内对照点；失败直接给病因（DNS / 拒绝 / 重置 / 超时 / TLS），最近 96 次刻度
+- **诊断结论**：右上角那句话是由证据算出来的，不是标题；鼠标停上去看支撑它的那几条
+- **站点**：按域名归并的 ↓↑，颜色跟实际出口（琥珀=隧道、青=直连）；底部「＋ 域名」可直接加，写回 `config.json`
+
+## 没开 VPN 的时候
+
+检测不到代理客户端就自动切**本机模式**（判定写 `本机直连`）：网卡总量、连接数、谁在连谁（按进程归并 TCP 连接，剔掉回环）。
+
+![本机模式](docs/panel-host.png)
+
+**权限决定粒度** —— 这是唯一需要你做选择的地方：
+
+| | 普通权限 | 管理员 |
+|---|---|---|
+| 网卡总量 / 连接数 / 谁在连谁 | ✅ | ✅ |
+| 每进程 ↓↑ 与曲线 | ❌ 只数连接 | ✅ 内核 eStats 差分（只数 TCP 净荷） |
+| 页脚 | `普通权限：只数连接` | `管理员：逐进程速率` |
+
+![本机模式 · 管理员](docs/panel-host-admin.png)
+
+eStats 在普通权限下返回 5 就**立刻**退回只数连接，不重试不编数字（`tools/test_estats.py` 覆盖）；UDP/QUIC 不进进程行。
+"客户端在跑但没连节点"也归到这里，理由写"读不到它的流量"—— 不再红着喊隧道坏了。
+
+## 适配哪些客户端
+
+自动发现，不用配：`netstat` 端口归属 → 探 `GET /version` 认 Clash API → 从内核命令行找配置 → 解析节点表 → 每步带存活校验；客户端退出后身份会被清掉。
+
+| 客户端 | 判定 | 节点名 | 逐条连接 | 字节 |
+|---|---|---|---|---|
+| Clash Verge / Mihomo Party / FlClash / mihomo / 机场定制 | ✅ | ✅ | ✅ | ✅ 按域名 |
+| sing-box（开 `clash_api`） | ✅ | ✅ | ✅ | ✅ 按域名 |
+| v2rayN（Xray 内核） | ✅ | ✅ 读 `guiNDB.db` | ❌ | ✅ 按出口 |
+| 其它 Xray 壳 / WireGuard / OpenVPN / Tailscale | ✅ | 认不到就显示地址 | ❌ | 网卡 + 出口 |
+| 什么都没开 | ✅ 本机直连 | — | ✅ 按进程 | 网卡总量 |
+
+四种可见度如实标注：**连接级**（按域名）/ **出口级**（v2rayN 从它自己写的 `metrics.listen` 打 `/debug/vars` 差分，只有"经代理 / 直连"两行）/ **只有网卡** / **本机级**。没有逐域名数据就说没有，不拿总数凑。
+
+![v2rayN 结构](docs/panel-xray.png)
+
+## 一句话结论怎么算的
+
+排除法：从底层往上排，越底层越先报。**红色只留给"说在用、但用不了"**，"现在没在用隧道"一律中性灰。
+
+| 结论 | 依据 | 该干什么 |
+|---|---|---|
+| 链路正常 | 对照 / 直连 / 代理三条全通 | 没事 |
+| 目标被墙，代理正常 | 对照和代理通、只有直连目标不通 | 正常现象 |
+| 目标需要进出隧道 | TUN 已接管，直连探测其实也走隧道 | 不用管 |
+| ⟨网卡⟩ 链路不通 | 连对照都打不开，且网关 ping 不回 | 查网线 / Wi-Fi |
+| DNS 解析有问题 | 网关通、对照域名解析不出来 | 换 DNS |
+| 链路通、外面不通 | 网关通、域名也解析得出，对照照样连不上 | 运营商 / 站点 |
+| VPN 本地代理口没开 | `127.0.0.1:7890` 拒绝或超时 | 客户端没启动 / 没开系统代理 |
+| 代理口被占，不是客户端 | 端口能连但不转发，也没找到客户端 | 换端口 |
+| VPN 没连上节点（灰） | 代理口通、客户端在，隧道里 0 条连接 | 选节点 / 点连接 |
+| VPN 拒绝连接 | 端口开着、客户端也在，但拒了 | 客户端没准备好 |
+| ⟨隧道网卡⟩ 链路不通 | 代理通道失败 + 隧道网卡网关不响应 | 先修链路 |
+| 代理侧 DNS 失败 | 请求到隧道了，域名在隧道里解析不出来 | 看节点 DNS |
+| VPN 隧道/节点异常 | 链路、代理口、连接都正常，经隧道还是打不通 | 换节点 / 看订阅 |
+| 只看本机流量（灰） | 读不到客户端，或压根没检测到 | 按网卡继续数 |
+
+## 数据从哪来
+
+| 事实 | 来源 |
+|---|---|
+| 系统代理开关 / 地址 | 注册表 `Internet Settings` 的 `ProxyEnable` / `ProxyServer` |
+| 客户端是谁、控制器在哪 | `netstat` 端口归属 + WMI；控制器自动发现，`config.json` 只当提示 |
+| 模式 / TUN / 节点表 | 控制器 `/configs`、`/version` + 内核命令行指向的配置 |
+| 每条连接走没走代理 | `/connections` 的 `chains`（`DIRECT` = 直连） |
+| 域名速率（Clash 系） | 连接累计字节 1 Hz 差分，按 `metadata.host` 归并 |
+| 经代理 / 直连（v2rayN） | `GET /debug/vars` → `stats.outbound[tag]`，同样差分 |
+| 网卡总量 | `GetIfTable2` 的 `InOctets` / `OutOctets`，1 Hz 差分，一直采 |
+| 不走代理 | 网卡总量 − 经代理（**差值估算**） |
+| 谁在连谁 | `GetExtendedTcpTable(OWNER_PID_ALL)`，按进程归并，剔回环 |
+| 每进程速率（管理员） | `SetPerTcpConnectionEStats` / `GetPerTcpConnectionEStats` → `DataBytesIn/Out` 差分 |
+| 出口 IP | 经代理口打 `ip-api.com`（120s 一次）/ 绕过代理（300s 一次） |
+| 走哪块网卡 | `connect()` 问内核选哪个源地址，再反查成网卡 |
+| Wi-Fi 细节 / 网关 / 度量 | `netsh wlan show interfaces`、`netsh interface ipv4 show addresses` |
+| 网关通不通 | `ping -n 1 -w 900`，只看退出码（不解析输出，中英文系统都稳） |
+| DNS 对不对 | 系统解析一次 + 直接 UDP 问 `223.5.5.5`，不一致标"疑似污染" |
+| 某块网卡单独通不通 | 把源地址绑到那块网卡再 `connect()` 目标 443 |
+| 连不上的原因 | 异常归类成 DNS / 拒绝 / 重置 / 超时 / 不可达 / TLS / 绑不上网卡 |
+
+## 配置（`config.json`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `port` | `7717` | 面板监听端口（只绑 127.0.0.1） |
-| `controller` | `127.0.0.1:7892` | Clash 控制器地址；**留空就完全自动发现**，填了就先试它 |
-| `mixed_port` | `127.0.0.1:7890` | 混合代理口：出口 IP 探测与"代理通道"探测走它。v2rayN 这类会从它自己的配置里读真实端口，这个值只兜底 |
-| `sites` | `["chatgpt.com","openai.com"]` | 要单独盯速率的域名，后缀匹配（`chat.openai.com` 算进 `openai.com`）。面板上「＋ 域名」改的就是这里 |
-| `probe_interval` | `10` | 探测间隔秒数，最小 5 |
-| `probe_target` | `https://chatgpt.com/` | 双通道探测打的目标 |
-| `control_target` | `https://www.baidu.com/` | 直连泳道里那个"对照"目标 |
+| `port` | `7717` | 面板端口，只绑 `127.0.0.1` |
+| `controller` | `127.0.0.1:7892` | Clash 控制器；留空就完全自动发现 |
+| `mixed_port` | `127.0.0.1:7890` | 出口 IP 探测和"代理通道"走它；v2rayN 会从自己配置里读，这个只兜底 |
+| `sites` | `["chatgpt.com","openai.com"]` | 单独盯速率的域名，后缀匹配；「＋ 域名」改的就是这里 |
+| `probe_interval` | `10` | 探测间隔秒，最小 5 |
+| `probe_target` / `control_target` | chatgpt / baidu | 双通道探测目标 / 直连泳道里的对照目标 |
 
-环境变量覆盖：`FLOW_PORT`、`FLOW_CONTROLLER`（其余项只认文件）。改完重启采集器生效。
+环境变量：`FLOW_PORT`、`FLOW_CONTROLLER`。改完重启采集器生效。
 
----
+## HTTP 接口
 
-## 八、HTTP 接口
-
-面板和采集器之间就是个普通 HTTP，全在 `127.0.0.1` 上：
-
-| 路径 | 内容 |
-|---|---|
-| `GET /` | 面板（单文件 HTML，内联 CSS/JS，手写 SVG 曲线，无外链 CDN） |
-| `GET /api/state` | 当前快照 JSON |
-| `GET /api/stream` | SSE，每秒一帧（面板默认用这个） |
-| `GET /?poll=1` | 让页面退化成 1 秒轮询（SSE 被中间件挡掉时用） |
-| `POST /api/sites` | 增删监测域名：`{"action":"add"\|"remove","domain":"github.com"}`，成功 200、域名不合法 400，返回新的列表 |
-
-快照主要字段：
+`/`（面板）、`/api/state`（快照 JSON）、`/api/stream`（SSE，每秒一帧）、`/?poll=1`（退化成轮询）、
+`POST /api/sites`（`{"action":"add"|"remove","domain":"github.com"}`）。快照关键字段：
 
 | 字段 | 内容 |
 |---|---|
-| `ok` / `error` | 这一帧采到没有 / 为什么没采到 |
-| `flow` | `""`（Clash 系，连接级）/ `xray`（出口级）/ `host`（本机模式，只有网卡 + 进程） |
-| `path` | `{active, reason, sysproxy}` —— 顶部那句判定和它的依据（`active`：`vpn` / `mixed` / `direct` / `down`） |
-| `diag` | `{state, label, why, evidence, ts}` —— 诊断结论：状态、一句话、为什么、证据列表 |
-| `tunnel` | `{up, mode, tun, mixed, controller, version, conns, download_total, upload_total}` |
-| `split` | `{nic, proxy, direct}` —— 网卡总量 / 经代理 / 不走代理（估算，本机模式下后两项为 `null`） |
-| `host` | `{nic, conns, cum, estats, elevated, procs}` —— 本机模式：网卡名、连接数、累计、eStats 是否可用、是否管理员、进程行 |
-| `client` | 发现的客户端：`name / kind / core / version / api / config / exe / pid / nodes / sub / metrics / local_proxy` |
-| `iface` / `route` | 当前网卡、两条泳道各自走哪块网卡 |
-| `node` | 当前节点：`name / server / port / type / rtt` |
-| `egress` | 两个出口 IP 与地理位置、最后更新时间 |
-| `probes` | `vpn / direct / control` 三路探测结果（含 `kind` 病因分类） |
-| `sites` / `extras` | 按域名（或按出口、按进程）归并的行 / 其余在跑流量的域名 |
-| `hist` | 服务端攒的最近 120 帧（约 2 分钟），面板一打开就有曲线，不用空等 |
-| `total` / `watched` | 总速率 / 当前监测列表 |
+| `flow` | `""`（Clash 系，连接级）/ `xray`（出口级）/ `host`（本机模式） |
+| `path` | `{active, reason, sysproxy}`，`active` = `vpn` / `mixed` / `direct` / `down` |
+| `diag` | `{state, label, why, evidence}` |
+| `split` | `{nic, proxy, direct}`；本机模式下后两项为 `null` |
+| `host` | `{nic, conns, cum, estats, elevated, procs}` |
+| 其它 | `tunnel` / `client` / `iface` / `route` / `node` / `egress` / `probes` / `sites` / `extras` / `hist` |
 
-`tools/peek.py` 是这套接口的命令行查看器（排障时比开面板快）。
+`tools/peek.py` 是这套接口的命令行查看器，排障时比开面板快。
 
----
+## 隐私
 
-## 九、隐私
+只监听 `127.0.0.1`（局域网里的别人连不上）；只读本机状态（注册表、进程表、网卡统计、配置文件，SQLite 只读打开）；
+外网请求只有出口 IP 探测和通道探测，不带任何身份；不写日志、不收集、不上传；面板不引任何外链（无 CDN / 字体 / 统计脚本）。
 
-- **只监听 `127.0.0.1`**，没有对外端口，同一局域网里的别人连不上
-- **只读本机状态**：注册表、进程表、网卡统计、配置文件；配置文件和 SQLite 都是只读打开
-- **外网请求只有两类**：出口 IP 探测（打 `ip-api.com`）和通道探测（打你自己配的目标）。
-  两者都带完整 URL 但**不带任何身份信息**
-- **不写日志文件**：采集器跑在 `pythonw` 下没有控制台，运行时除了 `state.json`（每个站点的累计字节）
-  和浏览器 profile 目录，不落任何东西
-- **不收集、不上传**任何数据。面板本身也不引外链（无 CDN、无字体、无统计脚本）
-- 想彻底断网看面板也行：出口探测失败只是显示"待测"，其余功能照常
-
----
-
-## 十、目录结构
+## 目录结构
 
 ```
-server.py            采集 + HTTP/SSE 服务（标准库，单文件）
-providers.py         客户端自动发现 / 配置解析 / 订阅感知 / Xray 统计口
-hostflow.py          本机模式的数据源：GetIfTable2 网卡计数 + GetExtendedTcpTable 连接表
-                     + 管理员下的 per-connection eStats（纯 ctypes）
-diag.py              诊断探针：网关 / DNS 对比 / 按网卡绑定握手 / 错误归类
-web/index.html       面板（单文件，内联 CSS/JS，手写 SVG 曲线）
-start.ps1            启动器（后台起服务 + 应用窗口打开面板；非管理员会提示怎么升级）
-start.cmd            双击入口（转调 start.ps1）
-package.json         npm 打包信息（包名 @7icence1z/flow-tracking、files 白名单、bin 入口）
-bin/flow.js          npm 的 flow 命令：只把参数翻译给 start.ps1，不含业务逻辑
-config.json          配置
-CHANGELOG.md         变更记录
-docs/panel.png       README 示意图（Clash 结构，演示数据）
-docs/panel-xray.png  README 示意图（v2rayN 结构，演示数据）
-docs/panel-host.png  README 示意图（没有代理客户端，演示数据）
-docs/panel-host-admin.png  README 示意图（本机模式 + 管理员，每进程速率）
-tools/peek.py        命令行看一眼当前快照（排障用）
-tools/mock_state.py  生成示意图用的假数据服务（`MOCK_XRAY=1` 切 v2rayN，`MOCK_HOST=1` 切本机模式，
-                     `MOCK_HOST=1 MOCK_ELEV=1` 切"管理员权限的本机模式"，`MOCK_DIAG=link` 等切诊断场景）
-tools/test_xray.py   v2rayN / Xray 适配的自检（不需要装 v2rayN）
-tools/test_diag.py   诊断归因的自检（构造证据，不发包）
-tools/test_estats.py eStats 通道自检（结构体 + 普通权限退化；管理员下真读一次）
-state.json           每个站点的累计流量（自动生成，已 gitignore）
-.app-profile/        面板窗口用的独立浏览器 profile（自动生成，已 gitignore）
+server.py             采集 + HTTP/SSE（标准库，单文件）
+providers.py          客户端发现 / 配置解析 / 订阅感知 / Xray 统计口
+hostflow.py           本机模式：GetIfTable2 + GetExtendedTcpTable + 管理员 eStats（纯 ctypes）
+diag.py               网关 / DNS 对比 / 按网卡握手 / 错误归类
+web/index.html        面板（单文件，内联 CSS/JS，手写 SVG）
+start.ps1, start.cmd  启动器 / 双击入口
+package.json, bin/flow.js  npm 包装（flow 只把参数翻译给 start.ps1）
+config.json           配置
+docs/                 四张示意图（Clash / v2rayN / 本机 / 本机+管理员）
+tools/                peek.py 看快照 · mock_state.py 造假数据出图 · test_diag / test_xray / test_estats 自检
 ```
 
----
+## 排障
 
-## 十一、排障
-
-| 现象 | 原因 / 怎么办 |
+| 现象 | 怎么办 |
 |---|---|
-| 面板说"本地控制器没有响应" | 客户端没开，或它没开 REST API。Clash 系在设置里勾上"外部控制"即可；不支持的客户端只能看到网卡与出口 |
-| 关了节点以后一直说隧道坏了 | 不会了。现在回落成本机模式（`本机直连`），理由写"客户端在跑，但读不到它的流量"；软件整个关掉后连客户端名都不再显示 |
-| 判定是"部分走 VPN" | 客户端在跑但系统代理没开：要么在客户端里打开系统代理，要么这就是实话（只有显式配代理的程序走隧道） |
-| 站点一直是 `0 B/s` | 该域名这 1 秒没有流量；或流量本来就走了直连（直连流量在 Clash 系客户端里通常不计入统计） |
-| 本机模式的"进程"只有连接数、没有速率 | 采集器是普通权限跑的。右键 `start.cmd` →「以管理员身份运行」，就能看到每进程的 ↓↑ 曲线（eStats，只数 TCP 净荷） |
-| v2rayN 模式显示"统计口没响应" | 你的 v2rayN 版本没写 `metrics.listen`，或那个端口被占用。面板会重试，不影响判定 |
-| 节点一栏是地址不是名字 | 配置里反查不到备注（v2rayN 看 `guiNDB.db`，Clash 看 yaml 的 `name`）。退回到地址是设计好的兜底 |
-| 端口 7717 被占用 | 换端口：`-Port 7718`，或改 `config.json` 的 `port` |
-| 点了 `start.ps1` 没反应 | 先看是不是已经开着（会直接退出）；再确认装了 Edge 或 Chrome；PowerShell 5.1 下 `.ps1` 若存成**无 BOM 的 UTF-8**，中文会被按 GBK 解析导致语法错 —— 用编辑器另存为 "UTF-8 with BOM" |
-| 中文乱码 / 启动器报语法错 | 同上：`.ps1` 必须是 UTF-8 **带 BOM**。仓库里的 `start.ps1` 带着 BOM，编辑后别把它存丢了 |
-| 面板不刷新 | SSE 被拦（某些安全软件）时，用 `http://127.0.0.1:7717/?poll=1` 退化成轮询 |
-| 窗口里一片空白 | 面板文件缺失或采集器没起来：直接浏览器开 `http://127.0.0.1:7717/api/state` 看有没有 JSON |
-| 诊断说"⟨网卡⟩ 链路不通"，可网明明是好的 | 有些路由器/防火墙默认不回 ICMP，网关 ping 不通≠链路坏。看同时刻的"直连对照"：它通就说明网是好的，诊断只是判不了链路 |
+| 面板说"本地控制器没有响应" | 客户端没开，或没开 REST API（Clash 系勾"外部控制"） |
+| 关了节点一直说隧道坏了 | 不会了，回落本机模式；软件关掉后连客户端名都不再显示 |
+| 进程卡只有连接数、没速率 | 普通权限。`flow stop` → `flow admin`，或右键 `start.cmd` 提权 |
+| 判定是"部分走 VPN" | 客户端在跑但系统代理没开 —— 只有显式配了代理的程序走隧道 |
+| 站点一直 `0 B/s` | 这秒没流量，或它走的是直连（Clash 系不计直连流量） |
+| 面板不刷新 | SSE 被拦，用 `http://127.0.0.1:7717/?poll=1` |
+| 中文乱码 / 启动器报语法错 | `.ps1` 必须是 UTF-8 **带 BOM**（仓库里带着，编辑后别把它存丢了） |
+| 诊断说"⟨网卡⟩ 链路不通"可网是好的 | 有些路由器不回 ICMP；看同时刻"直连对照"，它通就说明诊断判不了 |
 
----
+## 边界
 
-## 十二、边界（重要）
+- **只看得到客户端说它转发了多少**：系统代理关掉、程序又不认代理的流量不在连接表里，这时判定显示"部分走 VPN"；但网卡总量始终是真数，差额由"不走代理"暴露
+- **本机模式的粒度取决于权限**：逐进程 / 逐域名的字节数要内核 eStats 或 DNS 缓存，两者都要管理员（实测非管理员 `SetPerTcpConnectionEStats` 回 5、`ipconfig /displaydns` 直接要提升）；eStats 只数 **TCP 净荷**，UDP/QUIC 只体现在网卡总量；`GetExtendedTcpTable` 只给 TCP，数不到 UDP 会话
+- **精度**：不走去代理是**差值**（含帧开销、丢包、两个时钟的抖动）；粒度取决于客户端 —— Clash 到域名、Xray 到出口、WireGuard 只有网卡和出口 IP，**不拿总数摊到域名上冒充精确**
+- **诊断是排除法，不是抓包**：能分"链路 / DNS / 隧道 / 目标"四层，分不清"网线松了还是路由器坏了"；一轮 15 秒、与对照同频，证据是快照不是连续记录；公共 DNS 固定 `223.5.5.5`
+- **适配**：v2rayN 依据它生成配置的格式（构造样本 + 假统计口验证，没覆盖所有版本；`guiNDB.db` 结构变了只退回显示地址）；客户端没连节点时分不清"没连"还是"连了但不通"，按最可能的解释报灰
+- **只读**：不改系统代理、不改路由、不动客户端配置，杀掉采集器什么都不影响
+- **只有 Windows**：依赖注册表、WMI、`netsh`、`GetIfTable2`
 
-**权限与可见度**
+## 版本与自检
 
-1. **只看得到"客户端说自己转发了多少"。** 系统代理关掉、程序又不认代理时，那部分流量不在客户端的连接表里 ——
-   这时判定显示"部分走 VPN"，而不是假装知道全部。但**网卡总量一直是真数**，
-   分账里的"不走代理 = 网卡 − 经代理"就是用来暴露这部分差额的。
-2. **本机模式的粒度取决于权限。** 普通权限只有"网卡 + 连接数"：逐进程/逐域名的字节数要内核 eStats 或 DNS 缓存，
-   两者都要管理员（实测：非管理员 `SetPerTcpConnectionEStats` 回 5，`ipconfig /displaydns` 直接要提升）。
-   **管理员启动时** eStats 打开，每进程速率与曲线都是真数字；代价是每条被统计的连接多占一点内核内存，
-   连接关了就自动回收。
-3. **eStats 只数 TCP 净荷。** UDP/QUIC 的字节不进"进程"行，只体现在网卡总量里；所以同一秒里
-   "进程行相加"通常小于"网卡总量"，差值是 UDP + 帧开销，面板不摊派。
-4. **本机模式数不到 UDP 会话**（QUIC、DNS、游戏语音），因为 `GetExtendedTcpTable` 只给 TCP。
-5. **网卡是按"流量最大的那块物理网卡"选的**，无线有线同时在线时不会相加；双上行要分别看，得改 `hostflow.pick_nic`。
-
-**精度**
-
-6. **"不走代理"是差值，不是精确计量。** 它含 UDP/QUIC 的帧开销、被丢掉的包、以及网卡计数与客户端计数两个时钟之间的抖动；
-   差值小于噪声时显示 0 而不是负数。要精确到字节只能靠客户端。
-7. **粒度取决于客户端。** Clash 系能给到域名；Xray 只到出口；WireGuard 只有网卡和出口 IP。面板不会拿总数摊到域名上冒充精确。
-8. **"站点"是域名维度，不是进程维度。** 同一域名下多个连接会合并，同一个程序连两个域名会分成两行。
-9. **直连泳道是反证，不是某个程序的实际路径。** 它说明"这个目标不走代理通不通"。
-10. **出口 IP 每 120 / 300 秒刷新一次**，切节点后最多滞后这么久。
-11. **TUN 模式打开时**，"网卡"会变成 TUN 虚拟网卡，泳道展示的是隧道入口而非物理出口。
-
-**适配**
-
-12. **采集器只读**：不改系统代理、不改路由、不动任何客户端配置，杀掉它什么都不影响。
-13. **v2rayN 适配的依据是它生成配置的格式**，用构造样本 + 假统计口验证过，没覆盖 v2rayN 的所有版本；
-    `guiNDB.db` 表结构变过，反查失败只会退回显示地址，不影响流量。
-14. **客户端没连节点时，面板不知道你是"没连"还是"连了但不通"。** 它按最可能的解释报中性灰（没连上节点），
-    红色留给"隧道里有连接却打不通"。判断保守的那一次只会让你多看一眼，不会让你漏掉真问题。
-
-**诊断**
-
-15. **诊断是"排除法"，不是抓包。** 靠网关 ping、DNS 对比、按网卡握手来收缩范围，能分清"链路 / DNS / 隧道 / 目标"四层，
-    但分不清"链路里是网线松了还是路由器坏了"。
-16. **诊断一轮 15 秒，和对照探测同频。** 瞬时抖动可能被错过；证据是快照，不是连续记录。
-17. **公共 DNS 固定问 `223.5.5.5`。** 换地区或换 DoH 需要改 `diag.py`；系统解析与它对不上只提示"疑似污染"，不替你下结论。
-18. **按网卡绑定握手依赖 Windows 的源地址选路。** 网卡被禁用/地址漂移时会显示"绑不上网卡"，这是如实报告，不是 bug。
-
-**平台**
-
-19. **只有 Windows。** 依赖注册表、WMI、`netsh`、`GetIfTable2` 这些 Win32 接口。
-
----
-
-## 十三、版本、自检与变更
-
-版本号按语义化来：`主.次.修订`。当前 **v0.1.2**，完整记录见 [CHANGELOG.md](CHANGELOG.md)。
-
-- `v0.1.2`（[已发布](https://github.com/7icence1Z/flow-tracking/releases/tag/v0.1.2)）：**诊断结论**（链路 / DNS / 隧道 / 目标四层归因）
-  + 失败病因分类；**本机模式**（没开 VPN 也按网卡数流量、按进程看谁在连谁，管理员下还有每进程速率）；
-  **分账**（开着 VPN 时网卡总量 / 经代理 / 不走代理同时显示）；以及"关了节点不再误报隧道异常"等修正。
-- `v0.1.1`（[已发布](https://github.com/7icence1Z/flow-tracking/releases/tag/v0.1.1)）：多客户端自动发现（Clash 系 / sing-box / v2rayN / WireGuard 等）、
-  节点名解析、订阅感知、界面重做、独立应用窗口、v2rayN 出口级流量
-- `v0.1.0`：首个版本，只认 mihomo 的单一客户端版本
-
-### 自检（不用真的去坏网）
-
-三个脚本都只依赖标准库，跑法一样：
+语义化版本，当前 **v0.1.2**（[CHANGELOG](CHANGELOG.md)）。
+v0.1.2 = 诊断结论 + 本机模式（含管理员逐进程速率）+ 分账；v0.1.1 = 多客户端发现 / 节点名 / 订阅 / 界面重做；v0.1.0 = 只认 mihomo。
 
 ```powershell
-python -X utf8 tools\test_diag.py     # 诊断归因：14 组构造证据 + 9 组异常分类
-python -X utf8 tools\test_xray.py     # v2rayN 适配：假配置 + 假统计口
-python -X utf8 tools\test_estats.py   # eStats：结构体 + 普通权限退化（管理员下真读一次）
+python -X utf8 tools\test_diag.py     # 14 组构造证据 + 9 组异常分类
+python -X utf8 tools\test_xray.py     # v2rayN 适配（假配置 + 假统计口）
+python -X utf8 tools\test_estats.py   # eStats 结构体 + 普通权限退化
 ```
-
-它们证明的是"归因逻辑"和"解析逻辑"，不证明你的网络此刻通不通 —— 后者要靠面板自己看。
