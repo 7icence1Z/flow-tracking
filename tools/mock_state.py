@@ -4,7 +4,7 @@
   python tools\\mock_state.py 7799                 结构：Clash 系（按域名归并）
   set MOCK_XRAY=1 && python tools\\mock_state.py 7799   结构：v2rayN（经代理 / 直连两行）
   set MOCK_HOST=1 && python tools\\mock_state.py 7799   结构：没有代理客户端（按进程数连接）
-  set MOCK_LOOP=1 && python tools\\mock_state.py 7799   结构：客户端在转发、但没开统计口（回环口分账）
+  set MOCK_LOOP=1 && python tools\\mock_state.py 7799   结构：客户端在转发、但没开统计口（经本地口计数）
 
 然后 headless 截图 http://127.0.0.1:7799/?poll=1
 """
@@ -53,13 +53,13 @@ DIAG_CASES = {
              "why": "面板按网卡统计总流量、按连接数看谁在连谁（chatgpt.com 与 www.baidu.com 的探测照跑，"
                     "只是不归因到 VPN）。逐域名的字节数需要客户端统计口",
              "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 不通（超时）"]},
-    "loop": {"state": "nopx", "label": "客户端在转发（按本地口分账）", "tun": False,
+    "loop": {"state": "nopx", "label": "客户端在转发（经本地口计数）", "tun": False,
              "why": "系统代理指向 127.0.0.1:10808，v2rayN 确实在转发；它的统计口没开，"
-                    "但本地代理口上的回环连接能数出经代理字节 ——「经代理」是真数字，"
-                    "「不走代理」是网卡差额（估算）",
+                    "本地代理口上的回环连接能数出「进客户端」的字节，但那只是入口 —— "
+                    "其中多少进了隧道、多少按规则直连，读不到",
              "evidence": ["系统代理 127.0.0.1:10808（端口属于 v2rayN 的进程）",
                           "应用→代理口的回环 TCP 连接 6 条（eStats 差分）",
-                          "网卡总量 − 经代理 = 不走代理（估算）"]},
+                          "入口字节 ≠ 隧道字节：客户端按规则可能直连放出一部分"]},
 }
 
 
@@ -273,10 +273,11 @@ def snap(tick):
                              "meta": False, "flow": "xray", "metrics": "",
                              "local": "127.0.0.1:10808"}
             out["path"] = {
-                "active": "mixed", "brief": "在转发 · 经代理按本地口数，其余按网卡差额",
+                "active": "mixed", "brief": "在转发 · 经它的本地口计数，隧道份额未知",
                 "reason": ("系统代理已开启并指向 127.0.0.1:10808（v2rayN）：它确实在转发，"
-                           "但没给字节统计（统计口没开），所以「经代理」是按本地代理口上的"
-                           "环回连接数的，「不走代理」是网卡差出来的估算"),
+                           "但没给字节统计（统计口没开），只能数「应用 → 它的本地口」"
+                           "那条回环连接 —— 那是入口字节，其中多少进了隧道、多少被规则"
+                           "按直连放出去，读不到"),
                 "sysproxy": {"enable": 1, "server": "127.0.0.1:10808"}}
             out["tunnel"] = {"up": True, "mode": "", "tun": False, "mixed": "127.0.0.1:10808",
                              "controller": "", "version": "", "conns": 0,
@@ -286,17 +287,19 @@ def snap(tick):
                            "ip": "203.0.113.57", "rtt": 210}
             out["egress"]["vpn_ip"] = "203.0.113.57"
             out["egress"]["vpn_geo"] = "Singapore"
-            out["host"]["proxy"] = {"down": px_d, "up": px_u}
-            out["host"]["proxy_conns"] = 6
+            # 本机模式发布的 host 里没有明细字段：入口字节只走 split.client
+            out["split"] = {"nic": {"down": max(TOTAL_H), "up": round(max(TOTAL_H) * 0.09)},
+                            "proxy": None, "direct": None,
+                            "client": {"down": px_d, "up": px_u}, "src": "loop"}
             # 本地口在听、通道也通：这一路现在是"真的在用"，不是未启用
             out["probes"]["vpn"] = {"ok": True, "status": 200, "ms": 210, "ts": t - 4,
                                     "err": "", "kind": "", "body": ""}
-            # 浏览器走代理 → 它的行主要是隧道字节：并进总速率，标出其中经代理多少，染琥珀
+            # 浏览器流量主要进客户端 → 行标"经客户端"（中性色），不冒充琥珀色的"走 VPN"
             ch = out["host"]["procs"][0]
             ch["px_down"], ch["px_up"] = px_d, px_u
             ch["down"], ch["up"] = px_d + 80_000, px_u + 8_000
             out["sites"][0].update({"down": ch["down"], "up": ch["up"],
-                                    "px": px_d + px_u, "via": "vpn"})
+                                    "px": px_d + px_u, "via": "proxy"})
             out["_elev_hist"][ch["name"]] = [
                 [v, round(v * 0.11)] for v in
                 wave(HIST, ch["down"], [30, 62, 92], 4.0, ch["down"] * 0.08)]
@@ -308,13 +311,10 @@ def snap(tick):
     td, tu = out["total"]["down"], out["total"]["up"]
     if HOST:
         if LOOP:
-            px = out["host"].get("proxy") or {"down": 0, "up": 0}
-            out["split"] = {"nic": {"down": td, "up": tu},
-                            "proxy": dict(px),
-                            "direct": {"down": td - px["down"], "up": tu - px["up"]},
-                            "src": "loop"}
+            pass                      # LOOP 已在上面摆好（入口字节走 split.client）
         else:
-            out["split"] = {"nic": {"down": td, "up": tu}, "proxy": None, "direct": None}
+            out["split"] = {"nic": {"down": td, "up": tu}, "proxy": None, "direct": None,
+                            "client": None, "src": ""}
     else:
         nic_d, nic_u = round(td * 1.07), round(tu * 1.25)
         out["split"] = {"nic": {"down": nic_d, "up": nic_u},
