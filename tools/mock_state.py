@@ -1,8 +1,9 @@
 """生成 README 示意图用的演示快照服务（数据全是假的）。
 
-两种模式：
+三种模式：
   python tools\\mock_state.py 7799                 结构：Clash 系（按域名归并）
   set MOCK_XRAY=1 && python tools\\mock_state.py 7799   结构：v2rayN（经代理 / 直连两行）
+  set MOCK_HOST=1 && python tools\\mock_state.py 7799   结构：没有代理客户端（按进程数连接）
 
 然后 headless 截图 http://127.0.0.1:7799/?poll=1
 """
@@ -20,6 +21,37 @@ BOOT = time.time() - 3600 * 2 - 733
 rnd = random.Random(20261111)
 HIST = 120
 XRAY = (os.environ.get('MOCK_XRAY') == '1')
+HOST = (os.environ.get('MOCK_HOST') == '1')
+ELEV = (os.environ.get('MOCK_ELEV') == '1')
+
+# 诊断结论的几种样子，截图时用 MOCK_DIAG 选：ok / target / vpn / link / dns / nopx
+DIAG = os.environ.get("MOCK_DIAG", "nopx" if HOST else "target")
+DIAG_CASES = {
+    "ok": {"state": "ok", "label": "链路正常", "tun": False,
+           "why": "对照、直连、代理三条路都通，没发现异常",
+           "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 通 812ms",
+                        "代理通道 通", "网关 192.168.1.1（以太网）响应"]},
+    "target": {"state": "target", "label": "目标被墙，代理正常", "tun": False,
+               "why": "对照片和代理通道都通，只有直连 chatgpt.com 不通 —— 正常现象",
+               "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 不通（超时）",
+                            "代理通道 通", "网关 192.168.1.1（以太网）响应"]},
+    "vpn": {"state": "vpn", "label": "VPN 隧道/节点异常", "tun": False,
+            "why": "链路正常、直连对照片可通，但经代理访问 chatgpt.com 失败（超时）",
+            "evidence": ["对照 www.baidu.com 通 42ms", "直连 chatgpt.com 不通（超时）",
+                         "代理通道 不通（超时）", "网关 192.168.1.1（以太网）响应"]},
+    "link": {"state": "link", "label": "WLAN 链路不通", "tun": False,
+             "why": "连对照片都打不开，而且这块网卡的网关 192.168.1.1 不响应 —— 先查网线 / Wi-Fi 连接、路由器，不是 VPN 的事",
+             "evidence": ["对照 www.baidu.com 不通（超时）", "直连 chatgpt.com 不通（超时）",
+                          "代理通道 通", "网关 192.168.1.1（WLAN）无响应"]},
+    "dns": {"state": "dns", "label": "DNS 解析有问题", "tun": False,
+            "why": "网关在响应，但对照片域名解析不出来 —— 换 DNS 或检查 DNS 设置",
+            "evidence": ["对照 www.baidu.com 不通（DNS 解析失败）", "直连 chatgpt.com 不通（DNS 解析失败）",
+                         "代理通道 通", "网关 192.168.1.1（以太网）响应"]},
+    "nopx": {"state": "nopx", "label": "没有代理客户端，只看本机流量", "tun": False,
+             "why": "面板按网卡统计总流量、按连接数看谁在连谁（chatgpt.com 与 www.baidu.com 的探测照跑，"
+                    "只是不归因到 VPN）。逐域名的字节数需要客户端统计口",
+             "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 不通（超时）"]},
+}
 
 
 def wave(n, base, peak_at, width, floor=0.0):
@@ -93,10 +125,11 @@ def snap(tick):
         "egress": {"vpn_ip": "203.0.113.24", "vpn_geo": "Japan", "vpn_ts": t - 20, "vpn_err": "",
                    "direct_ip": "198.51.100.9", "direct_geo": "China", "direct_ts": t - 90,
                    "direct_err": ""},
-        "probes": {"vpn": {"ok": True, "status": 200, "ms": 812, "ts": t - 4, "err": "", "body": ""},
+        "probes": {"vpn": {"ok": True, "status": 200, "ms": 812, "ts": t - 4, "err": "", "kind": "", "body": ""},
                    "direct": {"ok": False, "status": 0, "ms": 3005, "ts": t - 4,
-                              "err": "URLError", "body": ""},
-                   "control": {"ok": True, "status": 200, "ms": 58, "ts": t - 9, "err": "", "body": ""}},
+                              "err": "URLError", "kind": "timeout", "detail": "TimeoutError: timed out",
+                              "body": ""},
+                   "control": {"ok": True, "status": 200, "ms": 58, "ts": t - 9, "err": "", "kind": "", "body": ""}},
         "sites": rows,
         "hist": {"total": [[x, round(x * 0.09)] for x in rot(TOTAL_H, i)],
                  "sites": {k: [[v, round(v * 0.11)] for v in vals] for k, vals in site_hist.items()}},
@@ -145,6 +178,95 @@ def snap(tick):
         out["watched"] = []
         out["extras"] = []
         out["total"] = {"down": pv + dv, "up": round((pv + dv) * 0.1)}
+    if HOST:
+        # 没有代理客户端：网卡总量 + 谁在连谁。行里没有字节数，只有连接数
+        th = wave(HIST, 3_400_000, [26, 58, 96], 4.2, 40_000)
+        tv = th[i]
+        out["flow"] = "host"
+        out["client"] = {"kind": "none", "name": "", "core": "", "version": "", "api": "",
+                         "config": "", "exe": "", "pid": 0, "mode": "", "nodes": 0,
+                         "meta": False, "sub": {}}
+        out["path"] = {"active": "direct",
+                       "reason": "没检测到代理客户端：按网卡「以太网」统计本机流量，"
+                                 "逐域名/逐进程的字节数要客户端统计口或管理员权限才看得到",
+                       "sysproxy": {"enable": 0, "server": ""}}
+        out["tunnel"] = {"up": False, "mode": "", "tun": False, "mixed": "", "controller": "",
+                         "version": "", "conns": 118, "download_total": 0, "upload_total": 0}
+        out["node"] = {"rtt": None}
+        out["route"] = {"vpn": {},
+                        "direct": {"name": "以太网", "kind": "ethernet", "ip": "192.168.1.42", "ssid": ""},
+                        "dual": False}
+        out["iface"] = {"name": "以太网", "kind": "ethernet", "routed": True, "ssid": "",
+                        "ip": "192.168.1.42", "gateway": "192.168.1.1", "metric": "25",
+                        "state": "", "band": ""}
+        out["mihomo"] = {"pid": 0, "config": "", "mode": ""}
+        out["egress"] = {"vpn_ip": "", "vpn_geo": "", "vpn_ts": 0, "vpn_err": "",
+                         "direct_ip": "198.51.100.9", "direct_geo": "China",
+                         "direct_ts": t - 60, "direct_err": ""}
+        out["probes"]["vpn"] = {"ok": False, "status": 0, "ms": 0, "ts": t - 4,
+                                "err": "ConnectionRefusedError", "kind": "refused",
+                                "detail": "ConnectionRefusedError: [WinError 10061]", "body": ""}
+        out["host"] = {"nic": "以太网", "conns": 118,
+                       "cum": {"down": 3_902_000_000, "up": 214_000_000},
+                       "procs": [
+                           {"name": "chrome.exe", "pid": 20208, "conns": 14, "remotes": 9,
+                            "sample": "101.91.136.148"},
+                           {"name": "Code.exe", "pid": 17120, "conns": 6, "remotes": 4,
+                            "sample": "140.82.113.4"},
+                           {"name": "svchost.exe", "pid": 14852, "conns": 5, "remotes": 3,
+                            "sample": "4.145.79.81"},
+                           {"name": "WeChat.exe", "pid": 3304, "conns": 3, "remotes": 2,
+                            "sample": "103.7.7.30"},
+                           {"name": "explorer.exe", "pid": 5180, "conns": 2, "remotes": 2,
+                            "sample": "52.110.20.130"},
+                           {"name": "OneDrive.exe", "pid": 6188, "conns": 2, "remotes": 1,
+                            "sample": "13.107.42.12"},
+                       ]}
+        out["sites"] = []
+        out["extras"] = []
+        out["watched"] = []
+        out["host"]["estats"] = False
+        out["host"]["elevated"] = False
+        if ELEV:
+            # 管理员权限：每进程都有 eStats 差分出来的真字节数，站点表直接复用
+            rates = [265_000, 88_000, 41_000, 12_400, 5_200, 1_100]
+            for k, p in enumerate(out["host"]["procs"]):
+                p["down"] = rates[k]
+                p["up"] = round(rates[k] * 0.13)
+                p["cum_down"] = 40_000_000 + k * 3_100_000
+                p["cum_up"] = 2_400_000 + k * 180_000
+            out["host"]["estats"] = True
+            out["host"]["elevated"] = True
+            out["path"]["reason"] = ("没检测到代理客户端：按网卡「以太网」统计本机流量，"
+                                     "管理员权限：每行的 ↓↑ 用内核 eStats 差分出来的"
+                                     "（含 TCP 净荷，不含 UDP）")
+            out["sites"] = [{"key": p["name"], "label": p["name"], "watched": True, "fixed": True,
+                             "down": p["down"], "up": p["up"], "conns": p["conns"],
+                             "ip": p["sample"], "chain": "", "rule": "", "via": "direct",
+                             "remotes": p["remotes"], "total_down": p["cum_down"],
+                             "total_up": p["cum_up"]} for p in out["host"]["procs"]]
+            out["watched"] = [p["name"] for p in out["host"]["procs"]]
+            for k, p in enumerate(out["host"]["procs"]):
+                out.setdefault("_elev_hist", {})[p["name"]] = [
+                    [v, round(v * 0.12)] for v in
+                    wave(HIST, p["down"], [30, 62, 92], 4.0 + k * 0.35, p["down"] * 0.08)]
+        out["hist"] = {"total": [[x, round(x * 0.09)] for x in rot(th, i)], "sites": {}}
+        out["total"] = {"down": round(tv), "up": round(tv * 0.09)}
+    # 分账：网卡总量 = 经代理 + 不走代理（演示数据；真机上后者是两块计数相减）
+    td, tu = out["total"]["down"], out["total"]["up"]
+    if HOST:
+        out["split"] = {"nic": {"down": td, "up": tu}, "proxy": None, "direct": None}
+    else:
+        nic_d, nic_u = round(td * 1.07), round(tu * 1.25)
+        out["split"] = {"nic": {"down": nic_d, "up": nic_u},
+                        "proxy": {"down": td, "up": tu},
+                        "direct": {"down": nic_d - td, "up": nic_u - tu}}
+        out["host"] = {"nic": "以太网", "conns": 132 if XRAY else 118,
+                       "cum": {"down": 3_902_000_000, "up": 214_000_000}, "procs": []}
+    out["diag"] = DIAG_CASES.get(DIAG, DIAG_CASES["target"])
+    out["diag"] = {**out["diag"], "ts": t - 6}
+    if "_elev_hist" in out:
+        out["hist"]["sites"] = out.pop("_elev_hist")
     return out
 
 

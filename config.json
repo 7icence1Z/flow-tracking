@@ -4,7 +4,8 @@
   "mixed_port": "127.0.0.1:7890",
   "sites": [
     "chatgpt.com",
-    "openai.com"
+    "openai.com",
+    "data.bilibili.com"
   ],
   "probe_interval": 10,
   "probe_target": "https://chatgpt.com/"

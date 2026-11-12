@@ -481,10 +481,27 @@ class Registry:
             else:
                 self._fallback(c, table)
                 self._xray(c, table)
+                # 进程真没了就别把上一秒的名字挂在面板上冒充"客户端还开着"：
+                # 没有控制器、没有统计口、连 pid 都不在进程表里 —— 当它没跑
+                if not c.api and not c.metrics and not (c.pid and table.get(c.pid)):
+                    self._clear(c)
             if c.config and c.flow != "xray":
                 self._nodes(c)
             self._sub(c)
             return c
+
+    def _clear(self, c: Client):
+        """客户端真的退出了：把身份清干净，让面板回到"没客户端"的本机模式
+
+        不清会怎样：关掉软件后 pid、名字、kind 还留着，面板继续按 Clash 的路径去问
+        一个已经不存在的控制器，然后把这当成"隧道异常"红着不动 —— 用户看到的就是
+        "VPN 都关了，怎么还在报隧道坏"。
+        """
+        c.kind, c.name, c.core, c.version = "none", "", "", ""
+        c.api, c.secret, c.config, c.data_dir, c.exe = "", "", "", "", ""
+        c.pid, c.mode, c.nodes, c.nodes_hash = 0, "", 0, ""
+        c.updated, c.sub, c.proxies = 0.0, {}, {}
+        c.meta, c.conf_mtime, c.metrics, c.local_proxy, c.flow = False, 0.0, "", "", ""
 
     def _alive(self, c: Client) -> bool:
         if not c.api:

@@ -1,0 +1,418 @@
+"""没有代理客户端时（也就是没开 VPN 的时候），本机流量怎么看
+
+Windows 上不用装任何东西就能拿到两样真东西：
+
+  1. `GetIfTable2`（iphlpapi）：每块网卡的 64 位累计字节
+     → 1 Hz 差分就是**真实的 ↓↑ 速率**，TCP / UDP / QUIC / 系统更新全都算在内。
+
+  2. `GetExtendedTcpTable`：所有 TCP 连接（本地/远端地址、PID）
+     → 配上进程表就知道"谁在连谁"，能数连接、能看见远端 IP。
+
+拿不到的东西，面板会明说，不编：
+
+  - **逐进程 / 逐域名的字节数**：内核 eStats（`GetPerTcpConnectionEStats`）和 DNS
+    缓存（`ipconfig /displaydns`）在普通权限下都是 ERROR_ACCESS_DENIED，
+    要管理员才能用。所以**普通权限**的本机模式下只给"连接数"，不给每行的字节速率。
+  - **以管理员身份启动时**，eStats 可用：对每条已建立连接开统计、1 Hz 差分，
+    就能给出和 VPN 那边一样的每进程 ↓↑ 速率曲线（数据来源见 `estats_*`）。
+    这时仍然只有 TCP 净荷字节，UDP/QUIC 只体现在网卡总量里。
+  - 逐域名归属同理：(Windows 的 DNS 缓存也要管理员) 。开了代理客户端时由它的
+    控制器提供，那才是面板的强项。
+
+全部是 ctypes 调 Win32，只用标准库。
+"""
+
+import ctypes
+import ctypes.wintypes as wt
+import re
+import time
+
+IF_MAX_STRING_SIZE = 256
+IF_MAX_PHYS_ADDRESS_LENGTH = 32
+IF_TYPE_SOFTWARE_LOOPBACK = 24
+IF_TYPE_TUNNEL = 131
+IF_OPER_STATUS_UP = 1
+
+# 一块网卡在 IP 栈里会挂好几个过滤驱动（WFP / QoS / MAC Layer Filter），
+# 它们的计数器和真网卡一模一样、名字长一截 —— 得排掉
+_RE_FAKE_NIC = re.compile(r"(WFP|QoS Packet Scheduler|MAC Layer|Filter-0000)", re.I)
+
+
+class MIB_IF_ROW2(ctypes.Structure):
+    # 字段顺序照 MSDN 抄：In 组在前、Out 组在后（不是 in/out 交替，抄错就差一个 8 字节）
+    _fields_ = [
+        ("InterfaceLuid", ctypes.c_ulonglong),
+        ("InterfaceIndex", wt.ULONG),
+        ("InterfaceGuid", ctypes.c_byte * 16),
+        ("Alias", wt.WCHAR * (IF_MAX_STRING_SIZE + 1)),
+        ("Description", wt.WCHAR * (IF_MAX_STRING_SIZE + 1)),
+        ("PhysicalAddressLength", ctypes.c_ulonglong),
+        ("PhysicalAddress", ctypes.c_ubyte * IF_MAX_PHYS_ADDRESS_LENGTH),
+        ("PermanentPhysicalAddress", ctypes.c_ubyte * IF_MAX_PHYS_ADDRESS_LENGTH),
+        ("Mtu", wt.ULONG),
+        ("Type", wt.ULONG),
+        ("TunnelType", wt.ULONG),
+        ("MediaType", wt.ULONG),
+        ("PhysicalMediumType", wt.ULONG),
+        ("AccessType", wt.ULONG),
+        ("DirectionType", wt.ULONG),
+        ("InterfaceAndOperStatusFlags", ctypes.c_ubyte),
+        ("OperStatus", wt.ULONG),
+        ("AdminStatus", wt.ULONG),
+        ("MediaConnectState", wt.ULONG),
+        ("NetworkGuid", ctypes.c_byte * 16),
+        ("ConnectionType", wt.ULONG),
+        ("TransmitLinkSpeed", ctypes.c_ulonglong),
+        ("ReceiveLinkSpeed", ctypes.c_ulonglong),
+        ("InOctets", ctypes.c_ulonglong),
+        ("InUcastPkts", ctypes.c_ulonglong),
+        ("InNUcastPkts", ctypes.c_ulonglong),
+        ("InDiscards", ctypes.c_ulonglong),
+        ("InErrors", ctypes.c_ulonglong),
+        ("InUnknownProtos", ctypes.c_ulonglong),
+        ("InUcastOctets", ctypes.c_ulonglong),
+        ("InMulticastOctets", ctypes.c_ulonglong),
+        ("InBroadcastOctets", ctypes.c_ulonglong),
+        ("OutOctets", ctypes.c_ulonglong),
+        ("OutUcastPkts", ctypes.c_ulonglong),
+        ("OutNUcastPkts", ctypes.c_ulonglong),
+        ("OutDiscards", ctypes.c_ulonglong),
+        ("OutErrors", ctypes.c_ulonglong),
+        ("OutUcastOctets", ctypes.c_ulonglong),
+        ("OutMulticastOctets", ctypes.c_ulonglong),
+        ("OutBroadcastOctets", ctypes.c_ulonglong),
+        ("OutQLen", ctypes.c_ulonglong),
+    ]
+
+
+class MIB_TCPROW_OWNER_PID(ctypes.Structure):
+    _fields_ = [("dwState", wt.DWORD), ("dwLocalAddr", wt.DWORD), ("dwLocalPort", wt.DWORD),
+                ("dwRemoteAddr", wt.DWORD), ("dwRemotePort", wt.DWORD), ("dwOwningPid", wt.DWORD)]
+
+
+TCP_TABLE_OWNER_PID_ALL = 5
+AF_INET = 2
+STATE_ESTABLISHED = 5
+
+# eStats：每条 TCP 连接的内核计数器。要管理员权限（普通权限 Set 返回 5 = ACCESS_DENIED）
+TCP_ESTATS_DATA = 1
+
+
+class MIB_TCPROW(ctypes.Structure):
+    """eStats 的 key：五元组，和 OWNER_PID 行前五个字段一模一样"""
+    _fields_ = [("dwState", wt.DWORD), ("dwLocalAddr", wt.DWORD), ("dwLocalPort", wt.DWORD),
+                ("dwRemoteAddr", wt.DWORD), ("dwRemotePort", wt.DWORD)]
+
+
+class TCP_ESTATS_DATA_RW(ctypes.Structure):
+    _fields_ = [("EnableCollection", ctypes.c_ubyte)]
+
+
+class TCP_ESTATS_DATA_ROD(ctypes.Structure):
+    # 顺序照 MSDN：8 字节计数器一簇在前，然后 4 字节的序号，中间夹一个 8 字节累计
+    _fields_ = [("DataBytesOut", ctypes.c_ulonglong),
+                ("DataSegsOut", ctypes.c_ulonglong),
+                ("DataBytesIn", ctypes.c_ulonglong),
+                ("DataSegsIn", ctypes.c_ulonglong),
+                ("SegsOut", ctypes.c_ulonglong),
+                ("SegsIn", ctypes.c_ulonglong),
+                ("SoftErrors", wt.ULONG),
+                ("SoftErrorReason", wt.ULONG),
+                ("SndUna", wt.ULONG),
+                ("SndNxt", wt.ULONG),
+                ("SndMax", wt.ULONG),
+                ("ThruBytesAcked", ctypes.c_ulonglong),
+                ("RcvNxt", wt.ULONG),
+                ("ThruBytesReceived", ctypes.c_ulonglong)]
+
+_ELEV = None
+
+_IP = None
+
+
+def _ip():
+    global _IP
+    if _IP is None:
+        _IP = ctypes.WinDLL("iphlpapi", use_last_error=True)
+        _IP.GetIfTable2.restype = wt.DWORD
+        _IP.GetIfTable2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        _IP.FreeMibTable.argtypes = [ctypes.c_void_p]
+        _IP.SetPerTcpConnectionEStats.restype = wt.DWORD
+        _IP.SetPerTcpConnectionEStats.argtypes = [
+            ctypes.POINTER(MIB_TCPROW), ctypes.c_int, ctypes.c_void_p, wt.ULONG, wt.ULONG, wt.ULONG]
+        _IP.GetPerTcpConnectionEStats.restype = wt.DWORD
+        _IP.GetPerTcpConnectionEStats.argtypes = [
+            ctypes.POINTER(MIB_TCPROW), ctypes.c_int,
+            ctypes.c_void_p, wt.ULONG, wt.ULONG,
+            ctypes.c_void_p, wt.ULONG, wt.ULONG,
+            ctypes.c_void_p, wt.ULONG, wt.ULONG]
+    return _IP
+
+
+def elevated() -> bool:
+    """是不是以管理员身份在跑 —— eStats 与 DNS 缓存的分水岭"""
+    global _ELEV
+    if _ELEV is None:
+        try:
+            _ELEV = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            _ELEV = False
+    return _ELEV
+
+
+def _row(c: dict) -> MIB_TCPROW:
+    # 结构里的地址/端口字段就是网络字节序，原样塞回去（tcp_conns 里存了 raw）
+    return MIB_TCPROW(c["state"], c["laddr"], c["lportn"], c["raddr"], c["rportn"])
+
+
+def estats_on(c: dict) -> int:
+    """给一条连接开统计。0 = 成功；5 = 没权限（普通权限就是这个）"""
+    rw = TCP_ESTATS_DATA_RW(1)
+    return _ip().SetPerTcpConnectionEStats(
+        ctypes.byref(_row(c)), TCP_ESTATS_DATA, ctypes.byref(rw), 0, ctypes.sizeof(rw), 0)
+
+
+def estats_bytes(c: dict):
+    """(发出去, 收到) 的字节数；没开统计 / 连接已关返回 None"""
+    rod = TCP_ESTATS_DATA_ROD()
+    rc = _ip().GetPerTcpConnectionEStats(
+        ctypes.byref(_row(c)), TCP_ESTATS_DATA, None, 0, 0, None, 0, 0,
+        ctypes.byref(rod), 0, ctypes.sizeof(rod))
+    if rc:
+        return None
+    return int(rod.DataBytesOut), int(rod.DataBytesIn)
+
+
+def if_table():
+    """每块网卡的累计字节。name 就是 netsh 里那个网卡名（以太网 2 / WLAN）"""
+    ip = _ip()
+    p = ctypes.c_void_p()
+    if ip.GetIfTable2(ctypes.byref(p)):
+        return []
+    try:
+        n = ctypes.cast(p, ctypes.POINTER(wt.ULONG))[0]
+        base = p.value + 8          # MIB_IF_TABLE2 = {ULONG NumEntries; ROW2 Table[]}，行按 8 字节对齐
+        sz = ctypes.sizeof(MIB_IF_ROW2)
+        out = []
+        for i in range(n):
+            r = MIB_IF_ROW2.from_address(base + i * sz)
+            out.append({"name": r.Alias, "idx": r.InterfaceIndex, "type": r.Type,
+                        "oper": r.OperStatus, "in": r.InOctets, "out": r.OutOctets,
+                        "desc": r.Description})
+        return out
+    finally:
+        ip.FreeMibTable(p)
+
+
+def tcp_conns():
+    """TCP 连接表（含 PID）。端口在结构里是网络字节序，这里翻成本机序"""
+    ip = _ip()
+    size = wt.ULONG(0)
+    ip.GetExtendedTcpTable(None, ctypes.byref(size), False, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)
+    if not size.value:
+        return []
+    buf = ctypes.create_string_buffer(size.value)
+    if ip.GetExtendedTcpTable(ctypes.byref(buf), ctypes.byref(size), False, AF_INET,
+                              TCP_TABLE_OWNER_PID_ALL, 0):
+        return []
+    n = ctypes.cast(buf, ctypes.POINTER(wt.ULONG))[0]
+    base = ctypes.addressof(buf) + ctypes.sizeof(wt.ULONG)
+    sz = ctypes.sizeof(MIB_TCPROW_OWNER_PID)
+    out = []
+    for i in range(n):
+        r = MIB_TCPROW_OWNER_PID.from_address(base + i * sz)
+        if not r.dwRemoteAddr:
+            continue
+        out.append({"state": r.dwState,
+                    "lip": a2s(r.dwLocalAddr), "lport": ntohs(r.dwLocalPort),
+                    "rip": a2s(r.dwRemoteAddr), "rport": ntohs(r.dwRemotePort),
+                    "pid": r.dwOwningPid,
+                    # eStats 要拿原始 DWORD 当 key（网络字节序，别翻）
+                    "laddr": r.dwLocalAddr, "lportn": r.dwLocalPort,
+                    "raddr": r.dwRemoteAddr, "rportn": r.dwRemotePort})
+    return out
+
+
+def a2s(a):
+    return ".".join(str((a >> s) & 0xFF) for s in (0, 8, 16, 24))
+
+
+def ntohs(p):
+    return ((p & 0xFF) << 8) | ((p >> 8) & 0xFF)
+
+
+def pick_nic(nics, name=""):
+    """优先按名字找（直连泳道用的那块）；找不到就挑当前流量最大的物理网卡"""
+    if name:
+        for n in nics:
+            if n["name"] == name:
+                return n
+    cand = [n for n in nics if n["oper"] == IF_OPER_STATUS_UP
+            and n["type"] not in (IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL)
+            and not _RE_FAKE_NIC.search(n["name"])]
+    if not cand:
+        return None
+    return max(cand, key=lambda n: n["in"] + n["out"])
+
+
+class HostFlow:
+    """本机模式：网卡总量 + 谁在连谁。1 Hz 采样，不碰任何网络
+
+    管理员权限下再上一层：给每条已建立连接开 eStats，差分出**每进程的 ↓↑ 速率**，
+    这样本机模式的"进程"表和 VPN 那边的"站点"表长得一样（有曲线、有速率）；
+    普通权限下 eStats 会回 ERROR_ACCESS_DENIED，就安静地退回"只数连接"。
+    """
+
+    MAX_ROWS = 6
+
+    def __init__(self, nic_name="", proc_fn=None):
+        self.nic_name = nic_name
+        self.proc_fn = proc_fn          # () -> {pid: {name, ...}}
+        self.procs = {}
+        self.procs_ts = 0.0
+        self.ts = 0.0
+        self.base = {}
+        self.cum = {"down": 0.0, "up": 0.0}
+        self.ema = {}
+        self.last = {"down": 0.0, "up": 0.0, "conns": 0, "nic": ""}
+        # eStats（每进程字节）：只在管理员下可用，失败一次就认命，不再重试
+        self.estats = elevated()
+        self._estats_cum = {}           # 进程名 → [收, 发] 累计
+        self._enabled = set()           # 已开统计的连接 key
+        self._prev = {}                 # key → (发, 收)
+        self._eema = {}                 # 进程名 → [↓, ↑] 速率（带一点平滑）
+
+    def _refresh_procs(self, now):
+        if self.proc_fn and now - self.procs_ts > 8:
+            try:
+                self.procs = self.proc_fn() or {}
+            except Exception:
+                self.procs = {}
+            self.procs_ts = now
+
+    def _name(self, pid):
+        info = self.procs.get(pid)
+        if isinstance(info, dict):
+            return (info.get("name") or f"pid {pid}").strip() or f"pid {pid}"
+        if isinstance(info, str) and info:
+            return info
+        return f"pid {pid}"
+
+    def sample(self, dt_min=0.05, want_procs=False):
+        now = time.time()
+        dt = max(dt_min, now - self.ts if self.ts else 1.0)
+        self.ts = now
+        if want_procs:
+            self._refresh_procs(now)
+
+        nics = if_table()
+        nic = pick_nic(nics, self.nic_name)
+        down = up = 0.0
+        if nic:
+            prev = self.base.get(nic["name"])
+            if prev:
+                d_in = nic["in"] - prev[0]
+                d_out = nic["out"] - prev[1]
+                # 计数器被重置 / 网卡重连：当成 0，别给一个天文数字
+                down = (d_in / dt) if d_in >= 0 else 0.0
+                up = (d_out / dt) if d_out >= 0 else 0.0
+            self.base[nic["name"]] = (nic["in"], nic["out"])
+            self.last["nic"] = nic["name"]
+        self.cum["down"] += down * dt
+        self.cum["up"] += up * dt
+
+        conns = tcp_conns()
+        # 回环连接（127.x）是本机进程间通信，不是"流量"，别让它霸榜
+        established = [c for c in conns
+                       if c["state"] == STATE_ESTABLISHED and not c["rip"].startswith("127.")]
+        rows = []
+        if want_procs:
+            per = {}
+            for c in established:
+                e = per.setdefault(c["pid"], {"n": 0, "remotes": set(), "down": 0.0, "up": 0.0})
+                e["n"] += 1
+                e["remotes"].add(c["rip"])
+            if self.estats:
+                self._rates(established, per, dt)
+            for pid, e in per.items():
+                nm = self._name(pid)
+                rows.append({"name": nm, "pid": pid, "conns": e["n"],
+                             "remotes": len(e["remotes"]),
+                             "sample": sorted(e["remotes"])[0] if e["remotes"] else "",
+                             "down": e["down"], "up": e["up"]})
+            # 同名进程（浏览器多进程）合并
+            merged = {}
+            for r in rows:
+                m = merged.setdefault(r["name"], {"name": r["name"], "pid": r["pid"], "conns": 0,
+                                                  "remotes": 0, "sample": r["sample"],
+                                                  "down": 0.0, "up": 0.0})
+                m["conns"] += r["conns"]
+                m["remotes"] += r["remotes"]
+                m["down"] += r["down"]
+                m["up"] += r["up"]
+            for nm, m in merged.items():
+                e = self._eema.setdefault(nm, [0.0, 0.0])
+                e[0] = e[0] * 0.4 + m["down"] * 0.6
+                e[1] = e[1] * 0.4 + m["up"] * 0.6
+                m["down"], m["up"] = e[0], e[1]
+                c = self._estats_cum.setdefault(nm, [0.0, 0.0])
+                c[0] += m["down"] * dt
+                c[1] += m["up"] * dt
+                m["cum_down"], m["cum_up"] = c[0], c[1]
+            for nm in list(self._eema):
+                if nm not in merged:
+                    self._eema.pop(nm, None)
+                    self._estats_cum.pop(nm, None)
+            if self.estats:
+                rows = sorted(merged.values(), key=lambda r: -(r["down"] + r["up"]))[:self.MAX_ROWS]
+            else:
+                rows = sorted(merged.values(),
+                              key=lambda r: (-r["conns"], -r["remotes"]))[:self.MAX_ROWS]
+
+        self.last["down"] = self.last["down"] * 0.45 + down * 0.55
+        self.last["up"] = self.last["up"] * 0.45 + up * 0.55
+        self.last["conns"] = len(established)
+        return {"total": (self.last["down"], self.last["up"]),
+                "cum": dict(self.cum),
+                "conns": len(established),
+                "conns_all": len(conns),
+                "procs": rows,
+                "estats": self.estats,
+                "nic": nic["name"] if nic else "",
+                "nics": len(nics)}
+
+    def _rates(self, conns, per, dt):
+        """每条连接查一次内核 eStats，差分出这一秒该进程收发了多少
+
+        只在管理员下走到这里：普通权限 Set 回 5（ACCESS_DENIED），立刻关掉这条路，
+        免得每秒白跑几百次系统调用。
+        """
+        live = set()
+        for c in conns:
+            key = (c["laddr"], c["lportn"], c["raddr"], c["rportn"])
+            live.add(key)
+            if key not in self._enabled:
+                rc = estats_on(c)
+                if rc == 5:                    # 没有管理员权限：认命，退回只数连接
+                    self.estats = False
+                    self._enabled.clear()
+                    self._prev.clear()
+                    return
+                if rc:
+                    continue                   # 连接刚好关了之类：这一秒跳过
+                self._enabled.add(key)
+            cur = estats_bytes(c)
+            if cur is None:
+                continue
+            prev = self._prev.get(key)
+            self._prev[key] = cur
+            if prev is None:
+                continue
+            e = per.get(c["pid"])
+            if not e:
+                continue
+            e["up"] += max(0, cur[0] - prev[0]) / dt
+            e["down"] += max(0, cur[1] - prev[1]) / dt
+        for k in [k for k in self._enabled if k not in live]:
+            self._enabled.discard(k)
+            self._prev.pop(k, None)

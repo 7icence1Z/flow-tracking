@@ -58,6 +58,13 @@ if (-not (Get-FlowProc)) {
   Write-Host '采集器已在运行'
 }
 
+# ── 权限提示：本机模式（没开 VPN 时）逐进程的 ↓↑ 速率要管理员权限（内核 eStats）
+$admin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+  ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $admin) {
+  Write-Host '提示：当前不是管理员 —— 本机模式只能数连接；想看每个进程的 ↓↑ 速率，请右键「以管理员身份运行」再开一次' -ForegroundColor DarkGray
+}
+
 # ── 等端口起来
 $ok = $false
 for ($i = 0; $i -lt 60; $i++) {

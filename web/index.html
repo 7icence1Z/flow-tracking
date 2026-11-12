@@ -127,6 +127,18 @@ h2{margin:0;font-size:11.5px;font-weight:500;color:var(--dim);letter-spacing:.02
 .pill.ok{color:var(--ok)}
 .pill.bad{color:var(--bad)}
 .pill.idle{color:var(--dim-2)}
+/* 诊断结论：一句话说清"这次该怀疑谁"，颜色即严重程度 */
+.dg{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-family:var(--mono);
+  color:var(--dim-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62%}
+.dg::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.9;flex:none}
+.dg[data-s="idle"]::before{opacity:.35}
+.dg[data-s="unknown"]::before{opacity:.5}
+.dg[data-s="nopx"]{color:var(--dim)}
+.dg[data-s="off"]{color:var(--dim)}
+.dg[data-s="off"]::before{opacity:.5}
+.dg[data-s="ok"]{color:var(--dir)}
+.dg[data-s="target"]{color:var(--vpn)}
+.dg[data-s="vpn"],.dg[data-s="link"],.dg[data-s="dns"],.dg[data-s="upstream"]{color:var(--bad)}
 .strip{margin-top:6px}
 .strip .lbl{display:flex;justify-content:space-between;font-size:9.5px;letter-spacing:.02em;
   color:var(--dim-2);margin-bottom:3px}
@@ -289,7 +301,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   </section>
 
   <section class="card probes">
-    <div class="card-head"><h2>通道探测</h2><span class="note" id="probeNote">—</span></div>
+    <div class="card-head"><h2>通道探测</h2><span class="dg" id="dgChip" data-s="idle">—</span></div>
     <div class="prow"><span class="nm">代理通道</span><span class="pill idle" id="pvPill">—</span><span class="res" id="pvRes">—</span></div>
     <div class="prow"><span class="nm">直连目标</span><span class="pill idle" id="pdPill">—</span><span class="res" id="pdRes">—</span></div>
     <div class="prow"><span class="nm">直连对照</span><span class="pill idle" id="pcPill">—</span><span class="res" id="pcRes">—</span></div>
@@ -301,7 +313,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
 
   <section class="card sites">
     <div class="card-head">
-      <h2>站点</h2>
+      <h2 id="siteTitle">站点</h2>
       <div class="sites-ops">
         <span class="note" id="siteNote">按域名归并 · 1s 采样</span>
         <button class="mini" id="addSiteBtn" type="button" title="添加要盯的域名">＋ 域名</button>
@@ -329,6 +341,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   const HIST = 120;
   const hist = { total: [], vpnSites: new Map() };
   let strip = [];
+  let hostMode = false;
+  let hostBytes = false;   // 本机模式且管理员权限 → 每行有真字节数（eStats）
+  let probeStamp = "";
   let lastProbeTs = 0;
   let bought = 0;
   const rowCache = new Map();
@@ -345,6 +360,11 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   const fmtRate = v => { const [n, u] = split(v); return [n, u + "/s"]; };
   const fmtBytes = v => { const [n, u] = split(v); return n + " " + u; };
   const fmtMs = ms => (ms == null ? "—" : ms < 0 ? "不通" : ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(2) + " s");
+  // 服务端把病因分好了类，这里只负责翻成人话（比显示 URLError 有用得多）
+  const KIND_CN = { dns: "DNS 失败", refused: "拒绝连接", reset: "连接重置", timeout: "超时",
+    unreach: "不可达", tls: "TLS 错误", http: "HTTP 错误", bind: "绑不上网卡",
+    offline: "无网络", unknown: "未知" };
+  const kindCn = k => KIND_CN[k] || "失败";
   const hhmmss = t => new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false });
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -401,7 +421,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     }
     svg.innerHTML = out;
     const ok = strip.filter(s => s.v).length;
-    $("#stripStat").textContent = strip.length ? `${ok}/${strip.length} 成功` : "采集中…";
+    const tail = probeStamp ? ` · ${probeStamp}` : "";
+    $("#stripStat").textContent = strip.length ? `${ok}/${strip.length} 成功${tail}` : "采集中…";
   }
 
   // 软件里的节点名常带 node_12_ 前缀和 "| CM CU" 后缀，链路里只留认得出的部分
@@ -465,6 +486,24 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       const key = s.key === "other" ? "其他" : s.label;
       seen.add(key);
       const r = ensureRow(key);
+      if (hostMode && !hostBytes) {
+        // 本机模式、没管理员权限：行里是进程，只有连接数没有字节数 —— 数字位改成"5 条 / 3 远端"
+        r.del.hidden = true;
+        r.f.setAttribute("d", ""); r.a.setAttribute("d", ""); r.b.setAttribute("d", "");
+        r.tag.dataset.via = "direct";
+        r.tag.textContent = "本机";
+        r.tag.hidden = true;      // 整张表都是本机进程，再挂个"本机"标签是废话
+        r.d.textContent = s.conns || 0;
+        r.du.textContent = "条";
+        r.u.textContent = s.remotes || 0;
+        r.uu.textContent = "远端";
+        r.dn.classList.remove("idle");
+        r.up.classList.remove("idle");
+        r.el.title = `${s.label} · ${s.conns} 条连接 · ${s.remotes} 个远端`
+          + (s.sample ? `\n例：${s.sample}` : "")
+          + "\n本机模式不统计每行字节数（要客户端统计口或管理员权限）";
+        continue;
+      }
       const hk = s.fixed ? s.key : key;    // 固定行（经代理/直连）的历史按 key 存，和后端一致
       const removable = s.key !== "other" && !s.fixed;
       r.del.hidden = !removable;
@@ -491,7 +530,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
         : via === "direct" ? "rgba(95,173,165,.11)" : "rgba(223,227,232,.05)";
       r.tag.dataset.via = via;
       r.tag.textContent = via === "vpn" ? "VPN" : via === "direct" ? "直连" : "空闲";
-      r.tag.hidden = r.tag.textContent === s.label;   // "直连 直连" 这种重复就别写了
+      // 本机模式下每行都是本机进程，"直连/空闲"标签是废话
+      r.tag.hidden = hostMode || r.tag.textContent === s.label;
       const [dn, dnu] = fmtRate(s.down);
       const [up, upu] = fmtRate(s.up);
       r.d.textContent = s.down ? dn : "0";
@@ -513,7 +553,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       if (!empty) {
         empty = document.createElement("div");
         empty.className = "sites-empty";
-        empty.textContent = "还没盯任何域名 —— 点右上角「＋ 域名」添加，或点下面的趋势标签";
+        empty.textContent = hostMode
+          ? "现在没有已建立的 TCP 连接（刚启动的话等一秒）"
+          : "还没盯任何域名 —— 点右上角「＋ 域名」添加，或点下面的趋势标签";
         box.appendChild(empty);
       }
     } else if (empty) {
@@ -526,6 +568,13 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const now = Date.now();
     const cli = s.client || {};
     const isX = s.flow === "xray";
+    const isHost = s.flow === "host";     // 没有代理客户端：网卡总量 + 谁在连谁
+    hostMode = isHost;
+    hostBytes = isHost && !!((s.host || {}).estats);
+    // 分账：网卡总量 vs 经代理 —— 有客户端时两条路同时看
+    const split = s.split || {};
+    const px = split.proxy || null;       // 经代理（客户端报的）
+    const dr = split.direct || null;      // ≈ 网卡 − 经代理
     lastPing = now;
 
     // 首次拿到快照时用服务端攒的历史打底，面板一打开就有曲线，而不是空等两分钟
@@ -547,12 +596,21 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
 
     const vd = $("#verdict");
     vd.dataset.s = active;
-    const label = { vpn: "走 VPN", direct: "直连", mixed: "部分走 VPN", down: "隧道异常" }[active] || "未知";
+    const label = { vpn: "走 VPN", direct: "直连", mixed: "部分走 VPN", down: "隧道读不到" }[active] || "未知";
     $("#verdictText").textContent = label;
     $("#verdictSub").textContent = active === "vpn" && node.name
       ? `${nodeLabel(node.name)} · ${eg.vpn_ip || "出口待测"}`
       : active === "mixed" ? "系统代理未开 · 仅显式代理的程序经隧道"
         : active === "direct" ? (eg.direct_ip || "") : "";
+    if (isHost) {
+      // 没有代理客户端、或客户端在跑但没在转发：不能说"直连"就不管了，
+      // 得让人知道现在是按网卡在数，以及为什么隧道那边没数
+      const cliName = (s.client || {}).name || "";
+      $("#verdictText").textContent = "本机直连";
+      $("#verdictSub").textContent = cliName
+        ? `${cliName} 没在转发 · 按网卡统计，不区分隧道`
+        : "没检测到代理客户端 · 按网卡统计，不区分隧道";
+    }
 
     /* 路径 A：VPN */
     const route = s.route || {};
@@ -567,16 +625,20 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     $("#vpnExit").textContent = eg.vpn_ip || "待测";
     const conns = (s.tunnel || {}).conns || 0;
     const tn2 = s.tunnel || {};
-    const isXray = s.flow === "xray";
+    const isXray = isX;
+    const host = s.host || {};
     // 没有连接表时"承载 N 条"和"rule 模式"都是空话，换成它真正能说的
     const head = isXray
       ? `<span class="on">统计口 ${(cli.metrics || "").split(":")[1] || "—"}</span>`
       : `<span class="on">承载 ${conns} 条</span>`;
-    const knobs = `${isXray ? (cli.name || "内核") : (cli.mode || "?")} · TUN ${tn2.tun ? "开" : "关"}`;
+    const knobs = isHost
+      ? `隧道未启用 · TUN ${tn2.tun ? "开" : "关"}`
+      : `${isXray ? (cli.name || "内核") : (cli.mode || "?")} · TUN ${tn2.tun ? "开" : "关"}`;
     const rtt = !node.rtt ? "" : node.rtt < 0 ? " · 节点超时" : ` · ${node.rtt}ms`;
+    const pxRate = px ? ` · ↓${fmtRate(px.down)[0]} ${fmtRate(px.down)[1]}` : "";
     $("#vpnMeta").innerHTML = vpnLane
-      ? `${head} · ${knobs}${rtt}`
-      : `未承载流量 · ${knobs}${rtt}`;
+      ? `${head}${pxRate} · ${knobs}${rtt}`
+      : `未承载流量${pxRate} · ${knobs}${rtt}`;
 
     /* 路径 B：直连 */
     const pd = probes.direct || {};
@@ -586,8 +648,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     $("#dirLocal").textContent = rd.ip || iface.ip || "—";
     $("#dirNic").textContent = rd.ssid || rd.name || "—";
     $("#dirExit").textContent = eg.direct_ip || "待测";
+    const drRate = dr ? `↓${fmtRate(dr.down)[0]} ${fmtRate(dr.down)[1]} · ` : "";
     $("#dirMeta").innerHTML = pd.ts
-      ? (pd.ok ? `<span class="on">目标可达 ${fmtMs(pd.ms)}</span>` : `<span class="off">目标不通</span> · 对照 ${
+      ? (pd.ok ? `<span class="on">${drRate}目标可达 ${fmtMs(pd.ms)}</span>` : `<span class="off">${drRate}目标不通</span> · 对照 ${
           (probes.control || {}).ok ? fmtMs(probes.control.ms) : "不通"}`)
       : "探测中";
 
@@ -599,8 +662,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       : "未检测到代理客户端";
     vd.title = p.reason || "";
 
-    /* 吞吐 */
-    const t = s.total || { down: 0, up: 0 };
+    /* 吞吐：大盘一律是"网卡总量"，因为那才是这台机器真实的流量；
+       走没走代理由下面的分账和每一行的标签说清楚 */
+    const t = split.nic || s.total || { down: 0, up: 0 };
     hist.total.push({ d: t.down, u: t.up });
     if (hist.total.length > HIST) hist.total.shift();
     const [dnv, dnu] = fmtRate(t.down);
@@ -615,27 +679,56 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     });
     renderMainChart();
     const tn = s.tunnel || {};
-    const cum = (k) => (s.sites || []).reduce((a, r) => a + (r["total_" + k] || 0), 0);
-    $("#dnTotalCap").textContent = isX ? "累计" : "本次";
-    $("#upTotalCap").textContent = isX ? "累计" : "本次";
-    $("#dnTotal").textContent = fmtBytes(isX ? cum("down") : tn.download_total);
-    $("#upTotal").textContent = fmtBytes(isX ? cum("up") : tn.upload_total);
-    $("#connCount").textContent = isX ? "—" : (tn.conns ?? 0);
-    $("#siteNote").textContent = isX ? "按出口归并 · 1s 采样" : "按域名归并 · 1s 采样";
+    const hcum = host.cum || { down: 0, up: 0 };
+    $("#dnTotalCap").textContent = "本次";
+    $("#upTotalCap").textContent = "本次";
+    $("#dnTotal").textContent = fmtBytes(hcum.down);
+    $("#upTotal").textContent = fmtBytes(hcum.up);
+    $("#dnTotal").title = `自本面板启动以来这块网卡的累计下行`;
+    $("#upTotal").title = `自本面板启动以来这块网卡的累计上行`;
+    const pconns = tn.conns ?? 0;
+    $("#connCount").textContent = isX ? "—" : (isHost ? (host.conns ?? 0) : pconns);
+    $("#connCount").title = isHost
+      ? "本机已建立的 TCP 连接数（不含回环）"
+      : `经代理 ${pconns} 条 · 本机共 ${host.conns ?? 0} 条（不含回环）`;
+    $("#siteNote").textContent = isHost
+      ? (hostBytes ? "按进程归并 · 1s 采样 · 管理员权限" : "只数连接 · 不数字节（要管理员权限）")
+      : isX ? "按出口归并 · 1s 采样" : "按域名归并 · 1s 采样";
+    $("#siteTitle").textContent = isHost ? "进程" : "站点";
     // 没有连接表就没有逐域名数据：别让"＋ 域名"点了却永远没数
-    $("#addSiteBtn").hidden = isX;
-    if (isX) { $("#siteForm").hidden = true; }
-    $("#tpNote").textContent = isX
-      ? (active === "down" ? "统计口未响应" : "Xray 统计 · 经代理的字节")
-      : (active === "down" ? "隧道未连接，无计数"
-        : vpnLane ? "经隧道（全机代理流量）" : "直连流量（隧道未承载）");
+    $("#addSiteBtn").hidden = isX || isHost;
+    $("#siteForm").hidden = isX || isHost;
+    const rate = (o, k) => { const [v, u] = fmtRate((o || {})[k] || 0); return v + " " + u; };
+    $("#tpNote").textContent = isHost
+      ? (host.nic ? `本机网卡总量 · ${host.nic}` : "本机网卡总量")
+      : (px && dr)
+        ? `经代理 ${rate(px, "down")} · 不走代理 ${rate(dr, "down")}`
+        : (active === "down" ? "隧道未连接，网卡照数" : "网卡总量");
+    $("#tpNote").title = isHost ? ""
+      : `网卡总量（含 UDP/QUIC）：↓${rate(t, "down")} ↑${rate(t, "up")}\n`
+        + `经代理：↓${rate(px, "down")} ↑${rate(px, "up")}\n`
+        + `不走代理（估算）：↓${rate(dr, "down")} ↑${rate(dr, "up")}`;
 
     /* 探测 */
     const pv = probes.vpn || {}, pc = probes.control || {};
     setProbe("#pvPill", "#pvRes", pv, "代理→目标");
     setProbe("#pdPill", "#pdRes", pd, "直连→目标");
     setProbe("#pcPill", "#pcRes", pc, "直连→baidu");
-    $("#probeNote").textContent = pv.ts ? hhmmss(pv.ts) + " 更新" : "—";
+    if (isHost) {
+      // 没装/没开客户端时 7890 当然连不上，标红只会误导：这一路本来就没启用
+      const pill = $("#pvPill");
+      pill.className = "pill idle";
+      pill.textContent = "未启用";
+      pill.title = "没有代理客户端，这条通道不存在";
+      $("#pvRes").textContent = "—";
+    }
+    probeStamp = pv.ts ? hhmmss(pv.ts).slice(0, 5) : "";
+    // 诊断结论：一句"该怀疑谁"，完整推理放 tooltip，免得把排版挤爆
+    const dg = s.diag || {};
+    const chip = $("#dgChip");
+    chip.dataset.s = dg.state || "idle";
+    chip.textContent = dg.label || "—";
+    chip.title = dg.label ? [dg.why, ...(dg.evidence || [])].filter(Boolean).join("\n") : "";
 
     if (pv.ts && pv.ts !== lastProbeTs) {
       lastProbeTs = pv.ts;
@@ -645,7 +738,12 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     }
 
     /* 站点 */
-    renderSites(s.sites || []);
+    // 本机模式的行是进程：管理员权限下每行有真字节数（eStats），
+    // 就用和"站点"完全一样的那套行（曲线 + ↓↑ 速率）；普通权限只有连接数
+    const procRows = (host.procs || []).map(p => ({
+      key: p.name, label: p.name, conns: p.conns, remotes: p.remotes, sample: p.sample,
+    }));
+    renderSites(isHost ? (hostBytes ? (s.sites || []) : procRows) : (s.sites || []));
     const extras = s.extras || [];
     $("#extras").innerHTML = extras.length
       ? `<span class="ex-lbl">其他</span>` + extras.map(e =>
@@ -664,7 +762,10 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     }
     if (route.dual) left += ` · 直连走 ${rd.name || "?"}${rd.ip ? " " + rd.ip : ""}`;
     $("#footLeft").textContent = left;
-    $("#footRight").textContent = `控制器 ${tn.controller || ""} · ${s.ok ? "在线" : "离线"} · ${hhmmss(s.ts || Date.now() / 1000)}`;
+    $("#footRight").textContent = isHost
+      ? `本机模式 · ${hostBytes ? "管理员：逐进程速率" : "普通权限：只数连接"}`
+        + ` · ${hhmmss(s.ts || Date.now() / 1000)}`
+      : `控制器 ${tn.controller || ""} · ${s.ok ? "在线" : "离线"} · ${hhmmss(s.ts || Date.now() / 1000)}`;
   }
 
   function shortServer(s) {
@@ -678,7 +779,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     if (!p || !p.ts) { pill.className = "pill idle"; pill.textContent = "—"; res.textContent = "—"; return; }
     const ok = !!p.ok;
     pill.className = "pill " + (ok ? "ok" : "bad");
-    pill.textContent = ok ? (p.status || 200) : (p.err || "失败");
+    pill.textContent = ok ? (p.status || 200) : (p.kind ? kindCn(p.kind) : (p.err || "失败"));
+    pill.title = ok ? "" : (p.detail || "");
     res.textContent = fmtMs(p.ms);
   }
 

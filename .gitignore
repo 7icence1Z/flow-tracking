@@ -13,3 +13,5 @@ tools/*
 !tools/peek.py
 !tools/mock_state.py
 !tools/test_xray.py
+!tools/test_diag.py
+!tools/test_estats.py
