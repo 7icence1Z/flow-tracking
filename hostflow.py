@@ -96,8 +96,17 @@ class MIB_TCPROW_OWNER_PID(ctypes.Structure):
                 ("dwRemoteAddr", wt.DWORD), ("dwRemotePort", wt.DWORD), ("dwOwningPid", wt.DWORD)]
 
 
+class MIB_TCP6ROW_OWNER_PID(ctypes.Structure):
+    # 有些客户端只绑 ::1 —— 端口归属必须把 v6 一起算，不然会"看不见监听者"
+    _fields_ = [("ucLocalAddr", ctypes.c_ubyte * 16), ("dwLocalScopeId", wt.DWORD),
+                ("dwLocalPort", wt.DWORD), ("ucRemoteAddr", ctypes.c_ubyte * 16),
+                ("dwRemoteScopeId", wt.DWORD), ("dwRemotePort", wt.DWORD),
+                ("dwState", wt.DWORD), ("dwOwningPid", wt.DWORD)]
+
+
 TCP_TABLE_OWNER_PID_ALL = 5
 AF_INET = 2
+AF_INET6 = 23
 STATE_ESTABLISHED = 5
 
 # eStats：每条 TCP 连接的内核计数器。要管理员权限（普通权限 Set 返回 5 = ACCESS_DENIED）
@@ -189,8 +198,18 @@ def estats_bytes(c: dict):
     return int(rod.DataBytesOut), int(rod.DataBytesIn)
 
 
+_NAMES: dict[int, tuple[str, str]] = {}     # idx → (网卡名, 描述)，见 if_table
+_NAMES_AT = 0.0
+
+
 def if_table():
-    """每块网卡的累计字节。name 就是 netsh 里那个网卡名（以太网 2 / WLAN）"""
+    """每块网卡的累计字节。name 就是 netsh 里那个网卡名（以太网 2 / WLAN）
+
+    名字（Alias/Description）是宽字符串，逐行读一次要几十微秒；而这一帧真正会变的
+    只有计数器。所以名字按网卡号缓存，半分钟对一次账（改名、插拔都还能跟上），
+    每帧只读 ULONG 字段 —— 一帧的耗时从这里的大头变成零头。
+    """
+    global _NAMES_AT
     ip = _ip()
     p = ctypes.c_void_p()
     if ip.GetIfTable2(ctypes.byref(p)):
@@ -199,15 +218,124 @@ def if_table():
         n = ctypes.cast(p, ctypes.POINTER(wt.ULONG))[0]
         base = p.value + 8          # MIB_IF_TABLE2 = {ULONG NumEntries; ROW2 Table[]}，行按 8 字节对齐
         sz = ctypes.sizeof(MIB_IF_ROW2)
+        now = time.monotonic()
+        fresh = now - _NAMES_AT > 30
         out = []
         for i in range(n):
             r = MIB_IF_ROW2.from_address(base + i * sz)
-            out.append({"name": r.Alias, "idx": r.InterfaceIndex, "type": r.Type,
-                        "oper": r.OperStatus, "in": r.InOctets, "out": r.OutOctets,
-                        "desc": r.Description})
+            idx = r.InterfaceIndex
+            nm = _NAMES.get(idx)
+            if nm is None or fresh:
+                nm = _NAMES[idx] = (r.Alias, r.Description)
+            out.append({"name": nm[0], "idx": idx, "type": r.Type,
+                        "oper": r.OperStatus, "media": r.MediaConnectState,
+                        "in": r.InOctets, "out": r.OutOctets,
+                        "desc": nm[1]})
+        if fresh:
+            _NAMES_AT = now
+            live = {e["idx"] for e in out}
+            for k in [k for k in _NAMES if k not in live]:
+                _NAMES.pop(k, None)
         return out
     finally:
         ip.FreeMibTable(p)
+
+
+class _SOCKET_ADDRESS(ctypes.Structure):
+    _fields_ = [("lpSockaddr", ctypes.c_void_p), ("iSockaddrLength", ctypes.c_int)]
+
+
+class _ADAPTER_ADDRESS(ctypes.Structure):
+    # IP_ADAPTER_UNICAST_ADDRESS 与 IP_ADAPTER_GATEWAY_ADDRESS 的头三段布局一样
+    _fields_ = [("Header", ctypes.c_ulonglong), ("Next", ctypes.c_void_p),
+                ("Address", _SOCKET_ADDRESS)]
+
+
+class _ADAPTER_ADDRESSES(ctypes.Structure):
+    # 只抄到 Ipv6Metric：后面那堆字段用不上，抄多了容易错位（8 字节对齐）
+    _fields_ = [("Header", ctypes.c_ulonglong),          # {Length, IfIndex}
+                ("Next", ctypes.c_void_p),
+                ("AdapterName", ctypes.c_char_p),
+                ("FirstUnicastAddress", ctypes.c_void_p),
+                ("FirstAnycastAddress", ctypes.c_void_p),
+                ("FirstMulticastAddress", ctypes.c_void_p),
+                ("FirstDnsServerAddress", ctypes.c_void_p),
+                ("DnsSuffix", wt.LPWSTR),
+                ("Description", wt.LPWSTR),
+                ("FriendlyName", wt.LPWSTR),
+                ("PhysicalAddress", ctypes.c_ubyte * 8),
+                ("PhysicalAddressLength", wt.ULONG),
+                ("Flags", wt.ULONG),
+                ("Mtu", wt.ULONG),
+                ("IfType", wt.ULONG),
+                ("OperStatus", wt.ULONG),
+                ("Ipv6IfIndex", wt.ULONG),
+                ("ZoneIndices", wt.ULONG * 16),
+                ("FirstPrefix", ctypes.c_void_p),
+                ("TransmitLinkSpeed", ctypes.c_ulonglong),
+                ("ReceiveLinkSpeed", ctypes.c_ulonglong),
+                ("FirstWinsServerAddress", ctypes.c_void_p),
+                ("FirstGatewayAddress", ctypes.c_void_p),
+                ("Ipv4Metric", wt.ULONG),
+                ("Ipv6Metric", wt.ULONG)]
+
+
+def _sock_ip(p) -> str:
+    """SOCKET_ADDRESS（sockaddr_in）→ 点分 IPv4。不是 v4 就返回空串"""
+    if not p:
+        return ""
+    sa = ctypes.cast(p, ctypes.POINTER(wt.USHORT * 2)).contents
+    if sa[0] != AF_INET:
+        return ""
+    raw = ctypes.string_at(p + 4, 4)
+    return ".".join(str(b) for b in raw)
+
+
+def adapters() -> dict[str, dict]:
+    """网卡名 → {ip, gateway, metric}。GetAdaptersAddresses 直读。
+
+    以前这两个数是 `netsh interface ipv4 show addresses` 的输出，每 20 秒起一个进程、
+    还要认本地化的字段名（"IP 地址" / "IP Address"）。内核里同样有，且不分语言。
+    """
+    ip = _ip()
+    ip.GetAdaptersAddresses.restype = wt.ULONG
+    ip.GetAdaptersAddresses.argtypes = [wt.ULONG, wt.ULONG, ctypes.c_void_p,
+                                        ctypes.c_void_p, ctypes.POINTER(wt.ULONG)]
+    size = wt.ULONG(16 * 1024)
+    GAA_FLAG_INCLUDE_GATEWAYS = 0x0080
+    buf = None
+    for _ in range(3):
+        buf = ctypes.create_string_buffer(size.value)
+        rc = ip.GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS, None,
+                                     buf, ctypes.byref(size))
+        if rc == 0:                                    # NO_ERROR
+            break
+        if rc != 111:                                  # ERROR_BUFFER_OVERFLOW
+            return {}
+    else:
+        return {}
+    out: dict[str, dict] = {}
+    p = ctypes.cast(buf, ctypes.POINTER(_ADAPTER_ADDRESSES))
+    while p:
+        a = p.contents
+        name = a.FriendlyName or ""
+        u = ctypes.cast(a.FirstUnicastAddress, ctypes.POINTER(_ADAPTER_ADDRESS))
+        addr = ""
+        while u:
+            cand = _sock_ip(u.contents.Address.lpSockaddr)
+            if cand:
+                addr = cand
+                if not cand.startswith("169.254."):
+                    break
+            if not u.contents.Next:
+                break
+            u = ctypes.cast(u.contents.Next, ctypes.POINTER(_ADAPTER_ADDRESS))
+        g = ctypes.cast(a.FirstGatewayAddress, ctypes.POINTER(_ADAPTER_ADDRESS))
+        gw = _sock_ip(g.contents.Address.lpSockaddr) if g else ""
+        if name and addr:
+            out[name] = {"ip": addr, "gateway": gw, "metric": str(a.Ipv4Metric)}
+        p = ctypes.cast(a.Next, ctypes.POINTER(_ADAPTER_ADDRESSES))
+    return out
 
 
 def tcp_conns():
@@ -239,8 +367,40 @@ def tcp_conns():
     return out
 
 
+def tcp_all():
+    """TCP 表全部行，连"只听不连"的也算；v4 + v6。端口归属靠它，别用 netstat 起进程"""
+    ip = _ip()
+    out = []
+    for family, row, sz in ((AF_INET, MIB_TCPROW_OWNER_PID, ctypes.sizeof(MIB_TCPROW_OWNER_PID)),
+                            (AF_INET6, MIB_TCP6ROW_OWNER_PID, ctypes.sizeof(MIB_TCP6ROW_OWNER_PID))):
+        size = wt.ULONG(0)
+        ip.GetExtendedTcpTable(None, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_ALL, 0)
+        if not size.value:
+            continue
+        buf = ctypes.create_string_buffer(size.value)
+        if ip.GetExtendedTcpTable(ctypes.byref(buf), ctypes.byref(size), False, family,
+                                  TCP_TABLE_OWNER_PID_ALL, 0):
+            continue
+        n = ctypes.cast(buf, ctypes.POINTER(wt.ULONG))[0]
+        base = ctypes.addressof(buf) + ctypes.sizeof(wt.ULONG)
+        for i in range(n):
+            r = row.from_address(base + i * sz)
+            out.append({"state": r.dwState, "lport": ntohs(r.dwLocalPort),
+                        "pid": r.dwOwningPid})
+    return out
+
+
+_A2S: dict[int, str] = {}
+
+
 def a2s(a):
-    return ".".join(str((a >> s) & 0xFF) for s in (0, 8, 16, 24))
+    """地址 → 点分字符串。同一秒里几百条连接只有几十个不同的地址，别重复拼"""
+    s = _A2S.get(a)
+    if s is None:
+        if len(_A2S) > 4096:
+            _A2S.clear()
+        s = _A2S[a] = ".".join(str((a >> sh) & 0xFF) for sh in (0, 8, 16, 24))
+    return s
 
 
 def ntohs(p):

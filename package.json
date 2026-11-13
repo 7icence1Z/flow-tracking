@@ -1,6 +1,6 @@
 {
   "name": "@7icence1z/flow-tracking",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Windows 小面板：这一刻的流量走直连还是走 VPN、走的哪块网卡、从哪个 IP 出去（纯 Python 标准库，零依赖）",
   "publishConfig": {
     "access": "public"

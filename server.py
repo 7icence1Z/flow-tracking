@@ -30,6 +30,7 @@ import time
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import ProxyHandler, Request, build_opener
+from urllib.parse import urlsplit
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -42,6 +43,7 @@ def _load_config() -> dict:
         "sites": ["chatgpt.com", "openai.com"],
         "probe_interval": 10,
         "probe_target": "https://chatgpt.com/",
+        "control_target": "https://www.baidu.com/",
     }
     path = os.path.join(BASE, "config.json")
     if os.path.exists(path):
@@ -64,14 +66,94 @@ DISCO = providers.Registry(CTRL)          # 自动发现：不绑死某一家客
 MIXED = str(CFG["mixed_port"])
 SITES = [s.strip().lower() for s in CFG["sites"] if s.strip()]
 PROBE_EVERY = max(5, int(CFG.get("probe_interval", 10)))
+PROBE_MIN, PROBE_MAX = 5, 120      # 面板上能改的探测间隔范围（秒）
 PROBE_TARGET = str(CFG.get("probe_target", "https://chatgpt.com/"))
 PROBE_HOST = PROBE_TARGET.split("//", 1)[-1].split("/", 1)[0]
 CONTROL_URL = str(CFG.get("control_target", "https://www.baidu.com/"))
 CONTROL_HOST = CONTROL_URL.split("//", 1)[-1].split("/", 1)[0]
 STATE_FILE = os.path.join(BASE, "state.json")
 CFG_PATH = os.path.join(BASE, "config.json")
+
+
+def L(zh: str, en: str) -> dict:
+    """面向面板的一句话，中英两版一起发：面板按自己的界面语言取，缺英文就退回中文"""
+    return {"zh": zh, "en": en}
+
+
+def _probe_url_err(u: str) -> dict:
+    """探测地址的准入：只要是 http(s) + 有主机名，且别指向本机
+
+    指向 127.0.0.1 / localhost 的"目标"证明不了隧道（那条路根本不出去），
+    所以直接拒绝，别让它一直"不通"却看不出原因。
+    返回空 dict 表示没问题，否则返回 L(zh, en) 的原因。
+    """
+    try:
+        p = urlsplit(u)
+    except Exception:
+        return L("地址不合法", "invalid URL")
+    if p.scheme not in ("http", "https"):
+        return L("只支持 http / https", "only http and https are supported")
+    if not p.hostname:
+        return L("缺少主机名", "no host name")
+    if p.hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return L("不能指向本机（探本机证明不了隧道）",
+                 "must not point at this machine (that proves nothing about the tunnel)")
+    return {}
+
+
+def set_probe(target=None, control=None, interval=None):
+    """改探测目标 / 对照目标 / 间隔：立刻生效（探测线程每轮都读这几个全局量）并落盘
+
+    以前这三个只能手改 config.json 再重启，而且 control_target 连默认文件里都没有；
+    面板上的 ✎ 就是走这里。
+    """
+    global PROBE_TARGET, PROBE_HOST, CONTROL_URL, CONTROL_HOST, PROBE_EVERY
+    changes: dict = {}
+    if target is not None:
+        t = str(target).strip()
+        err = _probe_url_err(t)
+        if err:
+            return False, L(f"探测目标不可用：{err['zh']}", f"Unusable probe target: {err['en']}")
+        changes["probe_target"] = t
+    if control is not None:
+        c = str(control).strip()
+        err = _probe_url_err(c)
+        if err:
+            return False, L(f"对照目标不可用：{err['zh']}", f"Unusable control target: {err['en']}")
+        changes["control_target"] = c
+    if interval is not None:
+        try:
+            iv = int(interval)
+        except Exception:
+            iv = 0
+        if not (PROBE_MIN <= iv <= PROBE_MAX):
+            return False, L(f"探测间隔需在 {PROBE_MIN}～{PROBE_MAX} 秒之间",
+                           f"Probe interval must be between {PROBE_MIN} and {PROBE_MAX} s")
+        changes["probe_interval"] = iv
+    if not changes:
+        return False, L("没有需要修改的内容", "Nothing to change")
+    if "probe_target" in changes:
+        PROBE_TARGET = changes["probe_target"]
+        PROBE_HOST = PROBE_TARGET.split("//", 1)[-1].split("/", 1)[0]
+    if "control_target" in changes:
+        CONTROL_URL = changes["control_target"]
+        CONTROL_HOST = CONTROL_URL.split("//", 1)[-1].split("/", 1)[0]
+    if "probe_interval" in changes:
+        PROBE_EVERY = changes["probe_interval"]
+    CFG.update(changes)
+    try:
+        with open(CFG_PATH, "w", encoding="utf-8") as f:
+            json.dump(CFG, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log("写 config.json 失败:", e)
+        return True, L("已生效，但写配置文件失败", "Applied, but writing config.json failed")
+    log("探测设置 →", f"{PROBE_TARGET} | {CONTROL_URL} | {PROBE_EVERY}s")
+    return True, L("探测设置已更新", "Probe settings updated")
+
+
 MAX_EXTRA_ROWS = 4
-HIST_MAX = 120
+HIST_MAX = 240            # 曲线留 240 帧：代理模式 0.5 秒一帧 = 2 分钟
+SAMPLE_EVERY = 0.5        # 有客户端时快采，曲线看起来才跟手（本机模式自己会退到 1 秒）
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))+$")
 
 
@@ -128,11 +210,7 @@ def api(path: str, timeout: float = 2.5):
     host = (c.api if c else "") or CTRL
     if not host:
         raise RuntimeError("未发现代理控制器")
-    req = Request(f"http://{host}{path}", headers={"Accept": "application/json"})
-    if c and c.secret:
-        req.add_header("Authorization", f"Bearer {c.secret}")
-    with DIRECT.open(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+    return providers._http_json(host, path, (c.secret if c else ""), timeout)
 
 
 def run(cmd, timeout: float = 6.0) -> str:
@@ -191,22 +269,37 @@ def http_get(url: str, proxy: str | None, timeout: float = 6.0, read: int = 4096
 
 # ---------------------------------------------------------------- 状态发布
 class State:
+    """一份快照，多个读者。
+
+    面板（SSE）、轮询、`flow peek` 拿的都是同一帧；以前每个读者各自 `json.dumps` 一遍，
+    240 点的历史曲线乘上站点数，一帧几十 KB、每个读者每次都要重新编码一次。
+    现在发布时编码一次，读者直接拿字节 —— 编码开销只跟"帧"有关，不跟"几个面板"有关。
+    """
+
     def __init__(self):
         self.lock = threading.Lock()
         self.boot = time.time()
         self.snap: dict = {}
+        self.blob = b"{}"
         self.version = 0
 
     def publish(self, snap: dict):
         snap["ts"] = time.time()
         snap["boot"] = self.boot
+        # 编码一次、留字节：SSE 直接拼 b"data: …"，轮询原样写回，两边都不再各自编码
+        blob = json.dumps(snap, ensure_ascii=False).encode("utf-8")
         with self.lock:
             self.snap = snap
+            self.blob = blob
             self.version += 1
 
     def read(self):
         with self.lock:
             return self.snap, self.version
+
+    def read_blob(self):
+        with self.lock:
+            return self.blob, self.version
 
 
 ST = State()
@@ -253,6 +346,8 @@ class NetInfo:
         self._last_dst = 0.0
 
     def _wlan(self) -> dict:
+        if not self._wlan_up():
+            return {}
         info: dict = {}
         for line in run(["netsh", "wlan", "show", "interfaces"]).splitlines():
             if ":" not in line:
@@ -265,7 +360,27 @@ class NetInfo:
             info["signal"] = info["signal"].rstrip("% ").strip()
         return info
 
+    @staticmethod
+    def _wlan_up() -> bool:
+        """有没有"真连着"的无线网卡。没有就别起 netsh（它一次 240 ms，有线机器上纯浪费）
+
+        拿不准（内核表读不到）时返回 True：宁可多花一次调用，也不让 Wi-Fi 信息消失。
+        """
+        try:
+            return any(n["type"] == 71 and n["media"] == 1 for n in hostflow.if_table())
+        except Exception:
+            return True
+
     def _addrs(self) -> dict:
+        """网卡名 → {ip, gateway, metric}。先问内核，拿不到再退回 netsh"""
+        try:
+            got = hostflow.adapters()
+        except Exception as e:
+            log("addrs:", e)
+            got = {}
+        return got or self._addrs_netsh()
+
+    def _addrs_netsh(self) -> dict:
         blocks: dict = {}
         cur = None
         for line in run(["netsh", "interface", "ipv4", "show", "addresses"]).splitlines():
@@ -503,6 +618,7 @@ class Collector:
         self.prev: dict[str, tuple[int, int]] = {}
         self.xprev: dict[str, tuple[int, int]] = {}     # Xray 统计口的上一帧累计值
         self.last_ts = 0.0
+        self.dt = 1.0          # 上一帧到这一帧的实测间隔（秒），面板据此显示采样节奏
         self.ema: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
         self.ex_ema: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
         self.ex_meta: dict[str, dict] = {}
@@ -571,15 +687,19 @@ class Collector:
         return out
 
     @staticmethod
-    def _why_unreadable(cli) -> str:
+    def _why_unreadable(cli, lang: str = "zh") -> str:
         """为什么读不到这个客户端的字节数 —— 每种客户端的原因不一样，别混成一句"""
+        en = lang == "en"
         if cli.metrics:
-            return f"统计口 {cli.metrics} 没响应"
+            return (f"its stats endpoint {cli.metrics} is not responding" if en
+                    else f"统计口 {cli.metrics} 没响应")
         if cli.api:
-            return f"控制器 {cli.api} 没响应"
+            return (f"its controller {cli.api} is not responding" if en
+                    else f"控制器 {cli.api} 没响应")
         if cli.kind in ("v2ray", "xray"):
-            return "它没开统计口（v2rayN 的 guiItem.enableStatistics 是关的）"
-        return "它不提供字节统计"
+            return ("statistics are off: v2rayN guiItem.enableStatistics = false" if en
+                    else "统计口未开启，v2rayN 的 guiItem.enableStatistics 是关的")
+        return ("it exposes no byte counters" if en else "它不提供字节统计")
 
     def _forwarding_proxy(self):
         """客户端此刻是否真的在转发：能证明就返回 (本地代理口, 证据)，证不了返回 ("", "")
@@ -673,7 +793,7 @@ class Collector:
         if self.host is None:
             lane = (self.net.route.get("direct") or {})
             self.host = hostflow.HostFlow(nic_name=lane.get("name") or "",
-                                          proc_fn=providers._ps_table)
+                                          proc_fn=providers._name_table)
         else:
             nic = (self.net.route.get("direct") or {}).get("name") or ""
             if nic and self.host.nic_name != nic:
@@ -703,6 +823,10 @@ class Collector:
         if not s:
             self._publish(ok=False, flow="host", hint=hint)
             return False
+        # 本机模式没有"每秒速率"这回事（eStats 本身就是按秒给的），但节奏要报给面板
+        now = time.time()
+        self.dt = max(0.25, now - self.last_ts) if self.last_ts else 1.0
+        self.last_ts = now
         self.host_data = s
         self.error = ""
         self.tot[0], self.tot[1] = s["total"]
@@ -747,6 +871,7 @@ class Collector:
         conns = data.get("connections") or []
         dt = max(0.25, now - self.last_ts) if self.last_ts else 1.0
         self.last_ts = now
+        self.dt = dt
 
         per_host: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
         per_n: dict[str, int] = defaultdict(int)
@@ -895,6 +1020,7 @@ class Collector:
         self.error = ""
         dt = max(0.25, now - self.last_ts) if self.last_ts else 1.0
         self.last_ts = now
+        self.dt = dt
 
         cli = DISCO.client
         ptag = next(iter(cli.proxies), "proxy")
@@ -966,64 +1092,105 @@ class Collector:
         brief = ""
         if flow == "host":
             nic = ns.get("nic") or "未知"
-            tail = ("管理员权限：每行的 ↓↑ 用内核 eStats 差分出来的（含 TCP 净荷，不含 UDP）"
-                    if host.get("estats") else
-                    "逐域名/逐进程的字节数要客户端统计口或管理员权限才看得到")
+            if host.get("estats"):
+                tz = "管理员权限：每行的 ↓↑ 由内核 eStats 差分得出（含 TCP 净荷，不含 UDP）"
+                te = "Administrator: per-row ↓↑ from kernel eStats deltas (TCP payload only, UDP excluded)"
+            else:
+                tz = "逐域名 / 逐进程的字节数需客户端统计口或管理员权限"
+                te = "Per-domain / per-process byte counts require the client's stats API or admin rights"
+            nz = cli.name or "客户端"
+            ne = cli.name or "client"
             if fwd:
-                # 系统代理指着它的本地口、那口是它自己开的 → 它确实在转发，只是没给字节数。
-                # 这时"没在转发"是假话，"全部直连"也不对：显式走系统代理的程序都在隧道里。
+                # 系统代理指着它的本地口、且能证明那个口是它开的 → 它在转发，只是没给字节数。
+                # 这时"未在转发"是假话，"全部直连"也不成立：使用系统代理的程序都在隧道里。
                 active = "mixed"
                 if hx:
-                    # 管理员下能数到"进客户端"的字节了，但入口不等于隧道（review #1）
-                    reason = (f"{cli.name or '客户端'} 正在转发（系统代理 → {fwd}，{fwd_why}）—— "
-                              f"它没给字节统计（{self._why_unreadable(cli)}），"
-                              f"只能数「应用 → 它的本地口」这条回环连接：那是入口字节，"
-                              f"其中多少进了隧道、多少被规则按直连放出去，读不到")
-                    brief = f"{cli.name or '客户端'} 在转发 · 经它的本地口计数，隧道份额未知"
+                    # 管理员下能数到"进客户端"的字节，但入口不等于隧道（review #1）
+                    reason = L(
+                        f"{nz} 正在转发（系统代理 → {fwd}，{fwd_why}）—— 它未提供字节统计"
+                        f"（{self._why_unreadable(cli)}），只能统计「应用 → 其本地端口」这条"
+                        f"回环连接：那是入口字节，其中多少进入隧道、多少按规则直连发出，无法读取",
+                        f"{ne} is forwarding (system proxy → {fwd}, {fwd_why}) but provides no "
+                        f"byte counters ({self._why_unreadable(cli, 'en')}); only the loopback "
+                        f"connection from applications to its local port can be counted — that "
+                        f"is ingress, and how much enters the tunnel versus leaves directly by "
+                        f"rule cannot be read")
+                    brief = L(f"{nz} 在转发 · 经其本地端口计数，隧道份额未知",
+                              f"{ne} is forwarding · counted at its local port, tunnel share unknown")
                 else:
-                    reason = (f"{cli.name or '客户端'} 正在转发（系统代理 → {fwd}，{fwd_why}），"
-                              f"但字节数读不到（{self._why_unreadable(cli)}）—— "
-                              f"只能按网卡「{nic}」数总量，分不出哪部分进了隧道")
-                    brief = f"{cli.name or '客户端'} 在转发，但读不到字节数 · 只按网卡「{nic}」统计"
+                    reason = L(
+                        f"{nz} 正在转发（系统代理 → {fwd}，{fwd_why}），但字节数不可读"
+                        f"（{self._why_unreadable(cli)}）—— 只能按网卡「{nic}」统计总量，"
+                        f"无法区分其中多少进入隧道",
+                        f"{ne} is forwarding (system proxy → {fwd}, {fwd_why}) but its byte "
+                        f"counters are unreadable ({self._why_unreadable(cli, 'en')}); totals can "
+                        f"only come from interface '{nic}', so the tunnel share cannot be separated")
+                    brief = L(f"{nz} 在转发，但字节数不可读 · 仅按网卡「{nic}」统计",
+                              f"{ne} is forwarding but byte counters are unreadable · "
+                              f"interface '{nic}' only")
             elif hint:
-                # 客户端进程还在，但读不到它的数（没连节点 / 统计口没开 / 控制器没开）：
-                # 别再说"没检测到客户端"，也别停摆，按网卡继续数
+                # 客户端进程还在，但读不到它的数（未连节点 / 统计口未开 / 控制器未开）：
+                # 不要说成"未检测到客户端"，也不要停摆，按网卡继续统计
                 active = "direct"
-                reason = f"{hint}：按网卡「{nic}」统计本机流量，{tail}"
-                brief = f"读不到 {cli.name or '客户端'} 的流量 · 按网卡「{nic}」统计"
+                reason = L(f"{hint['zh']}：按网卡「{nic}」统计本机流量，{tz}",
+                           f"{hint['en']}: totals come from interface '{nic}'; {te}")
+                brief = L(f"读不到 {nz} 的流量 · 按网卡「{nic}」统计",
+                          f"{ne} bytes unreadable · interface '{nic}' only")
             else:
                 active = "direct"
-                reason = f"没检测到代理客户端：按网卡「{nic}」统计本机流量，{tail}"
-                brief = f"没检测到代理客户端 · 按网卡「{nic}」统计"
+                reason = L(f"未检测到代理客户端：按网卡「{nic}」统计本机流量，{tz}",
+                           f"No proxy client detected: totals come from interface '{nic}'; {te}")
+                brief = L(f"未检测到代理客户端 · 按网卡「{nic}」统计",
+                          f"No proxy client · interface '{nic}' only")
 
         elif not ok and flow == "xray":
             active = "vpn" if sp_on else ("mixed" if cli.name else "down")
-            reason = (f"{cli.name or '客户端'} 在跑，但统计口 {cli.metrics or '?'} 这一帧没响应，"
-                      f"字节数暂时读不到")
+            nz = cli.name or "客户端"
+            ne = cli.name or "client"
+            reason = L(f"{nz} 在运行，但统计口 {cli.metrics or '?'} 本帧无响应，字节数暂不可读",
+                       f"{ne} is running, but its stats endpoint {cli.metrics or '?'} did not "
+                       f"answer this frame; byte counts are temporarily unavailable")
         elif not ok:
             # 没有 Clash 系控制器：别的客户端（v2rayN / WireGuard / 深信服…）不暴露连接表，
-            # 这时只能说清楚"能看见什么"，不能假装知道逐条流量
+            # 这时只能说清"能看见什么"，不能假装知道逐条流量
+            srv = self.sysproxy.get("server") or self.proxy
             if sp_on:
                 active = "vpn"
-                reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or self.proxy}，"
-                          f"但没找到可读的连接控制器，逐条明细不可见")
+                reason = L(f"系统代理已开启并指向 {srv}，但未找到可读取的连接控制器，逐条明细不可见",
+                           f"System proxy is on and points to {srv}, but no readable connection "
+                           f"controller was found; per-connection detail is unavailable")
             elif cli.name and cli.kind not in ("clash", "singbox", "none"):
                 active = "mixed"
-                reason = f"检测到 {cli.name}，它不暴露连接表；下面只有网卡与出口层面的数据"
+                reason = L(f"检测到 {cli.name}，它不暴露连接表；面板只有网卡与出口层面的数据",
+                           f"Detected {cli.name}, which exposes no connection table; only "
+                           f"interface and egress data is available")
             else:
-                active, reason = "down", "本地控制器没有响应，无法读取连接表"
+                active = "down"
+                reason = L("本地控制器无响应，无法读取连接表",
+                           "The local controller is not responding, so the connection table "
+                           "cannot be read")
         elif sp_on:
             active = "vpn"
-            tail = (f"{cli.core} {mode} 模式" if mode
-                    else (cli.name or cli.core or "客户端"))
-            reason = (f"系统代理已开启并指向 {self.sysproxy.get('server') or self.proxy}"
-                      f"（{tail}），代理感知型应用全部经隧道转发")
+            srv = self.sysproxy.get("server") or self.proxy
+            if mode:
+                mtz, mte = f"{cli.core} {mode} 模式", f"{cli.core} {mode} mode"
+            else:
+                mtz, mte = (cli.name or cli.core or "客户端"), (cli.name or cli.core or "client")
+            reason = L(f"系统代理已开启并指向 {srv}（{mtz}），使用系统代理的应用全部经隧道转发",
+                       f"System proxy is on and points to {srv} ({mte}); applications using it "
+                       f"are tunnelled")
         elif tun:
-            active, reason = "vpn", "系统代理未开，但 TUN 已接管全部流量"
+            active = "vpn"
+            reason = L("系统代理未开启，但 TUN 已接管全部流量",
+                       "System proxy is off, but TUN captures all traffic")
         elif mode == "global":
-            active, reason = "mixed", "mihomo 为 global 模式但系统代理未开：只有显式配代理的程序走 VPN"
+            active = "mixed"
+            reason = L("mihomo 处于 global 模式但系统代理未开启：仅显式配置代理的程序经隧道",
+                       "mihomo is in global mode with the system proxy off: only programs "
+                       "configured to use the proxy are tunnelled")
         else:
-            active, reason = "direct", "系统代理未开启，流量直连"
+            active = "direct"
+            reason = L("系统代理未开启，流量直连", "System proxy is off; traffic goes direct")
 
         sites = [r for r in (rows or []) if r["watched"]]
         extras = sorted([r for r in (rows or []) if r["key"].startswith("extra:") and (r["down"] + r["up"]) > 0],
@@ -1049,6 +1216,7 @@ class Collector:
         ST.publish({
             "ok": ok,
             "error": self.error,
+            "dt": round(self.dt, 2),
             "path": {"active": active, "reason": reason, "brief": brief, "sysproxy": self.sysproxy},
             "tunnel": {"up": ok and flow != "host", "mode": mode, "tun": tun, "mixed": self.proxy,
                        "controller": cli.metrics or cli.api or CTRL, "version": self.ver,
@@ -1070,6 +1238,10 @@ class Collector:
             "mihomo": self.net.mihomo,
             "egress": self.egress,
             "probes": probes,
+            "probe": {"target": PROBE_TARGET, "host": PROBE_HOST,
+                      "control": CONTROL_HOST, "control_url": CONTROL_URL,
+                      "interval": PROBE_EVERY,
+                      "min": PROBE_MIN, "max": PROBE_MAX},
             "diag": self.diag,
             "link": {"ts": (link or {}).get("ts", 0),
                      "gw": (link or {}).get("gw") or {},
@@ -1185,6 +1357,8 @@ class Collector:
         fwd：本机模式下"客户端确实在转发"的本地代理口（空 = 没证明到），
         由 _forwarding_proxy() 算好传进来 —— 这里不自己探测，免得一帧里两套证据。
         px：有没有从环回代理连接里数出字节（管理员）；有就别再嘴硬说"读不到字节数"。
+
+        label / why / evidence 一律是 L() 双语对象：面板按界面语言取，缺英文退回中文。
         """
         # 调用方把这一帧的证据传进来，避免"判定用的探测"和"显示出来的探测"是两批数据
         p = probes if probes is not None else (self.probes or {})
@@ -1199,127 +1373,208 @@ class Collector:
         pp = lk.get("proxy_port") or {}
         tun = bool((self.cfg or {}).get("tun", {}).get("enable"))
         ctl_ok = bool(pc.get("ok"))
+        cli = DISCO.client
 
-        def lane_name(nic):
+        def lane(nic, lang):
+            if lang == "en":
+                return nic.get("ssid") or nic.get("name") or "network interface"
             return nic.get("ssid") or nic.get("name") or "网卡"
 
-        ev: list[str] = []
+        # 一条证据 = 判别码 + 两种语言；判别码只用于过滤（如"代理通道没启用就别列它"）
+        ev: list = []
+
+        def add(code, zh, en):
+            ev.append({"code": code, "zh": zh, "en": en})
+
         if pc:
-            ev.append(f"对照 {CONTROL_HOST} " + ("通" if ctl_ok else f"不通（{diag.label(pc.get('kind') or 'unknown')}）")
-                      + f" {pc.get('ms', 0)}ms")
+            add("control",
+                f"对照 {CONTROL_HOST} " + ("可达" if ctl_ok else f"不可达（{diag.label(pc.get('kind') or 'unknown')}）")
+                + f" {pc.get('ms', 0)}ms",
+                f"control {CONTROL_HOST} " + ("reachable" if ctl_ok else f"unreachable ({diag.label(pc.get('kind') or 'unknown', 'en')})")
+                + f" {pc.get('ms', 0)}ms")
         if pd:
-            ev.append(f"直连 {PROBE_HOST} " + ("通" if pd.get("ok") else f"不通（{diag.label(pd.get('kind') or 'unknown')}）"))
+            add("direct",
+                f"直连 {PROBE_HOST} " + ("可达" if pd.get("ok") else f"不可达（{diag.label(pd.get('kind') or 'unknown')}）"),
+                f"direct {PROBE_HOST} " + ("reachable" if pd.get("ok") else f"unreachable ({diag.label(pd.get('kind') or 'unknown', 'en')})"))
         if pv:
-            ev.append(f"代理通道 " + ("通" if pv.get("ok") else f"不通（{diag.label(pv.get('kind') or 'unknown')}）"))
+            add("proxy",
+                "代理通道 " + ("可达" if pv.get("ok") else f"不可达（{diag.label(pv.get('kind') or 'unknown')}）"),
+                "proxy path " + ("reachable" if pv.get("ok") else f"unreachable ({diag.label(pv.get('kind') or 'unknown', 'en')})"))
         if gd.get("ip"):
-            ev.append(f"网关 {gd['ip']}（{lane_name(rd)}）" + ("响应" if gd.get("ok") else "无响应"))
+            add("gw_direct",
+                f"网关 {gd['ip']}（{lane(rd, 'zh')}）" + ("有响应" if gd.get("ok") else "无响应"),
+                f"gateway {gd['ip']} ({lane(rd, 'en')}) " + ("responding" if gd.get("ok") else "not responding"))
         if gv.get("ip") and gv.get("ip") != gd.get("ip"):
-            ev.append(f"网关 {gv['ip']}（{lane_name(rv)}）" + ("响应" if gv.get("ok") else "无响应"))
+            add("gw_vpn",
+                f"网关 {gv['ip']}（{lane(rv, 'zh')}）" + ("有响应" if gv.get("ok") else "无响应"),
+                f"gateway {gv['ip']} ({lane(rv, 'en')}) " + ("responding" if gv.get("ok") else "not responding"))
         if dns.get("mismatch"):
-            ev.append("系统解析与公共 DNS 给出的地址不一致（疑似污染）")
+            add("dns", "系统解析与公共 DNS 给出的地址不一致（疑似污染）",
+                "system resolution differs from public DNS (possible poisoning)")
         elif (dns.get("target") or {}).get("system", {}).get("ok") is False:
-            ev.append(f"{PROBE_HOST} 解析不出地址")
+            add("dns", f"{PROBE_HOST} 解析不出地址", f"{PROBE_HOST} does not resolve")
 
         def out(state, label, why, evs=None):
+            src = ev if evs is None else evs
             return {"state": state, "label": label, "why": why,
-                    "evidence": (ev if evs is None else evs)[:5],
+                    "evidence": [{"zh": x["zh"], "en": x["en"]} for x in src][:5],
                     "tun": tun, "ts": lk.get("ts", 0)}
+
+        def only(*codes):
+            return [x for x in ev if x["code"] in codes]
+
+        def skip(*codes):
+            return [x for x in ev if x["code"] not in codes]
 
         # 有结论才谈得上归因；一个探针都还没跑过就老实说不知道
         if not (pv or pd or pc):
-            return out("unknown", "等第一轮探测", "刚启动，还没采到证据")
+            return out("unknown", L("等待首轮探测", "Waiting for the first probe"),
+                       L("刚启动，尚未取得证据", "Just started; no evidence yet"))
 
         # ⓪ 压根没有代理客户端（也没开系统代理/TUN）—— 这不叫故障，是本机模式
         #    再往下判会得出"VPN 本地代理口没开"这种红字，可用户根本没装/没打算开
         sp_on = self.sysproxy.get("enable") == 1
         client_on = bool(DISCO.client.name and DISCO.client.kind != "none")
         if flow == "host" and client_on:
-            # 客户端的壳还在跑，但转发那一层的数读不到：这是"现在没在用隧道"，
-            # 不是"隧道坏了"，所以给中性灰，不给红。
+            # 客户端的壳还在跑，但转发那一层的数读不到：这是"当前未使用隧道"，
+            # 不是"隧道故障"，所以给中性灰，不给红。
             # 但要分清两种"读不到"：一种能证明它在转发（系统代理指着它自己开的
-            # 本地口），那种只能叫"读不到字节数"，绝不能替它说"没在转发"（issue #1）。
-            name = DISCO.client.name
+            # 本地口），那种只能叫"读不到字节数"，绝不能替它说"未在转发"（issue #1）。
+            name = cli.name
+            en_name = cli.name
             if fwd:
                 if px:
-                    return out("nopx", "客户端在转发（经本地口计数）",
-                               f"系统代理指向 {fwd}，{name} 确实在转发；它的统计口没开"
-                               f"（{self._why_unreadable(DISCO.client)}），"
-                               f"本地代理口上的回环连接能数出「进客户端」的字节，"
-                               f"但那只是入口 —— 其中多少进了隧道、多少按规则直连，读不到",
-                               [x for x in ev if not x.startswith("代理通道")])
-                return out("nopx", "客户端在转发，读不到字节数",
-                           f"系统代理指向 {fwd}，{name} 确实在转发；但它没给字节统计"
-                           f"（{self._why_unreadable(DISCO.client)}）—— "
-                           f"这里只能数网卡总量，分不出哪一部分进了隧道",
-                           [x for x in ev if not x.startswith("代理通道")])
-            return out("nopx", "没在走隧道，只看本机流量",
-                       f"{name} 的进程还在，但读不到它的流量统计 —— 要么没连节点，"
-                       f"要么它的统计来源没开；网卡总流量和连接数照数，"
-                       f"逐域名明细要等它能给出字节数",
-                       [x for x in ev if not x.startswith("代理通道")])
+                    return out("nopx", L("客户端在转发（经本地口计数）", "Client is forwarding (counted at local port)"),
+                               L(f"系统代理指向 {fwd}，{name} 确实在转发；其统计口未开"
+                                 f"（{self._why_unreadable(cli)}），本地代理口上的回环连接可数出"
+                                 f"「进入客户端」的字节，但那只是入口 —— 其中多少进入隧道、"
+                                 f"多少按规则直连发出，无法读取",
+                                 f"System proxy points to {fwd} and {en_name} is indeed forwarding; "
+                                 f"its stats endpoint is off ({self._why_unreadable(cli, 'en')}). "
+                                 f"Loopback connections on its local proxy port give the bytes "
+                                 f"entering the client, but that is ingress only — how much enters "
+                                 f"the tunnel versus leaves directly by rule cannot be read"),
+                               skip("proxy"))
+                return out("nopx", L("客户端在转发，但字节数不可读", "Client is forwarding; byte counts unreadable"),
+                           L(f"系统代理指向 {fwd}，{name} 确实在转发；但它未提供字节统计"
+                             f"（{self._why_unreadable(cli)}）—— 这里只能统计网卡总量，"
+                             f"无法区分其中多少进入隧道",
+                             f"System proxy points to {fwd} and {en_name} is indeed forwarding, "
+                             f"but it provides no byte counters "
+                             f"({self._why_unreadable(cli, 'en')}) — only interface totals are "
+                             f"available, so the tunnel share cannot be separated"),
+                           skip("proxy"))
+            return out("nopx", L("未在走隧道，仅统计本机流量", "Not tunnelled; local totals only"),
+                       L(f"{name} 的进程仍在，但读不到它的流量统计 —— 可能未连接节点，"
+                         f"或其统计来源未开启；网卡总流量与连接数照常统计，"
+                         f"逐域名明细需其提供字节数",
+                         f"{en_name} is still running but its traffic statistics cannot be read — "
+                         f"it may not be connected to a node, or its stats source is off; interface "
+                         f"totals and connection counts still work, per-domain detail needs byte counters"),
+                       skip("proxy"))
         if not client_on and not sp_on and not tun:
-            return out("nopx", "没有代理客户端，只看本机流量",
-                       f"面板按网卡统计总流量、按连接数看谁在连谁（{PROBE_HOST} 与 {CONTROL_HOST} "
-                       f"的探测照跑，只是不归因到 VPN）。逐域名的字节数需要客户端统计口",
-                       [x for x in ev if not x.startswith(("代理通道", "网关"))])
+            return out("nopx", L("没有代理客户端，仅统计本机流量", "No proxy client; local totals only"),
+                       L(f"面板按网卡统计总流量、按连接数查看连接归属（{PROBE_HOST} 与 {CONTROL_HOST} "
+                         f"的探测照常运行，只是不归因于 VPN）。逐域名字节数需客户端统计口",
+                         f"The panel counts interface totals and shows connection ownership "
+                         f"({PROBE_HOST} and {CONTROL_HOST} are still probed, just not attributed "
+                         f"to the VPN). Per-domain byte counts need the client's stats API"),
+                       skip("proxy", "gw_direct", "gw_vpn"))
 
-        # ① 对照片都打不开 → 问题在本机链路或 DNS，不在 VPN
+        # ① 对照都不可达 → 问题在本机链路或 DNS，不在 VPN
         if pc and not ctl_ok:
             if gd.get("ip") and not gd.get("ok"):
-                return out("link", f"{lane_name(rd)} 链路不通",
-                           f"连对照片都打不开，而且这块网卡的网关 {gd['ip']} 不响应 —— "
-                           f"先查网线/ Wi-Fi 连接、路由器，不是 VPN 的事")
+                return out("link", L(f"{lane(rd, 'zh')} 链路不通", f"{lane(rd, 'en')} link down"),
+                           L(f"连对照目标都不可达，且该网卡的网关 {gd['ip']} 无响应 —— "
+                             f"先检查网线 / Wi-Fi 与路由器，与 VPN 无关",
+                             f"Even the control target is unreachable, and the gateway {gd['ip']} "
+                             f"on this interface does not respond — check the cable / Wi-Fi and "
+                             f"router first; this is not a VPN issue"))
             if (dns.get("control") or {}).get("system", {}).get("ok") is False:
-                return out("dns", "DNS 解析有问题",
-                           "网关在响应，但对照片域名解析不出来 —— 换 DNS 或检查 DNS 设置")
-            return out("upstream", "链路通、外面不通",
-                       "网关响应正常、域名也解析得出，但连对照片都失败 —— 问题在运营商或站点侧")
+                return out("dns", L("DNS 解析异常", "DNS resolution failing"),
+                           L("网关有响应，但对照域名无法解析 —— 更换 DNS 或检查 DNS 设置",
+                             "The gateway responds, but the control domain does not resolve — "
+                             "change DNS or check DNS settings"))
+            return out("upstream", L("链路正常，外部不可达", "Link up, upstream down"),
+                       L("网关响应正常、域名也可解析，但对照仍不可达 —— 问题在运营商或站点侧",
+                         "Gateway responds and DNS resolves, but the control target is still "
+                         "unreachable — the problem is upstream (ISP or site)"))
 
-        # ② 链路正常，代理通道打不开 → 隧道/节点
+        # ② 链路正常，代理通道不可达 → 隧道/节点
         if pv and not pv.get("ok"):
             kind = pv.get("kind") or "unknown"
             ppk = pp.get("kind") or ""
             if not pp.get("ok") and ppk in ("refused", "timeout"):
                 if "refused" in (ppk, kind):
-                    return out("vpn", "VPN 本地代理口没开",
-                               f"{self.proxy} 拒绝连接 —— 客户端没启动，或那个端口是别的程序")
-                return out("vpn", "VPN 本地代理口没开",
-                           f"{self.proxy} 连不上（超时）—— 客户端可能没启动，或没开系统代理")
+                    return out("vpn", L("VPN 本地代理口未开", "VPN local proxy port closed"),
+                               L(f"{self.proxy} 拒绝连接 —— 客户端未启动，或该端口被其他程序占用",
+                                 f"{self.proxy} refused the connection — the client is not running, "
+                                 f"or another program holds the port"))
+                return out("vpn", L("VPN 本地代理口未开", "VPN local proxy port closed"),
+                           L(f"{self.proxy} 无法连接（超时）—— 客户端可能未启动，或系统代理未开启",
+                             f"Cannot connect to {self.proxy} (timeout) — the client may not be "
+                             f"running, or the system proxy is off"))
             if kind == "refused":
-                cli = DISCO.client
                 if not (cli.name and cli.kind != "none"):
-                    return out("vpn", "代理口被占，不是客户端",
-                               f"{self.proxy} 能连上但拒绝转发，而且没找到代理客户端 —— 多半是别的程序占了这个端口")
-            # 代理口通、客户端在跑，但隧道里一条连接都没有 —— 这不是"节点坏了"，是"还没连上"
-            # （关掉节点连接之后最常见：以前这里会一直红着喊"隧道异常"）
+                    return out("vpn", L("代理口被占用，非客户端", "Proxy port held by another program"),
+                               L(f"{self.proxy} 可连接但拒绝转发，且未找到代理客户端 —— "
+                                 f"多半是其他程序占用了该端口",
+                                 f"{self.proxy} accepts connections but refuses to forward, and no "
+                                 f"proxy client was found — most likely another program holds it"))
+            # 代理口通、客户端在跑，但隧道里一条连接都没有 —— 这不是"节点故障"，是"尚未连接"
+            # （断开节点连接之后最常见：以前这里会一直红着喊"隧道异常"）
             if conns == 0 and flow not in ("", "host"):
-                return out("off", "VPN 没连上节点",
-                           f"{self.proxy} 能连上、客户端也在跑，但隧道里一条连接都没有 —— "
-                           f"多半是没选节点、或点了断开；连上节点这一格会自己变绿")
+                return out("off", L("VPN 未连接节点", "VPN not connected to a node"),
+                           L(f"{self.proxy} 可连接、客户端也在运行，但隧道内没有任何连接 —— "
+                             f"多半未选择节点，或已断开；连接节点后此格会自动恢复正常",
+                             f"{self.proxy} is reachable and the client is running, but there are "
+                             f"no connections in the tunnel — probably no node selected, or it was "
+                             f"disconnected; this clears once a node connects"))
             if kind == "refused":
-                return out("vpn", "VPN 拒绝连接",
-                           f"本地代理口 {self.proxy} 把请求拒了（{diag.label(kind)}）—— 客户端在跑但没准备好，或端口改了")
+                return out("vpn", L("VPN 拒绝连接", "VPN refused the connection"),
+                           L(f"本地代理口 {self.proxy} 拒绝了请求（{diag.label(kind)}）—— "
+                             f"客户端在运行但未就绪，或端口已变更",
+                             f"The local proxy port {self.proxy} refused the request "
+                             f"({diag.label(kind, 'en')}) — the client runs but is not ready, "
+                             f"or the port changed"))
             if gv.get("ip") and not gv.get("ok"):
-                return out("link", f"{lane_name(rv)} 链路不通",
-                           f"隧道所在网卡的网关 {gv['ip']} 不响应 —— 先修链路，VPN 只是症状")
+                return out("link", L(f"{lane(rv, 'zh')} 链路不通", f"{lane(rv, 'en')} link down"),
+                           L(f"隧道所在网卡的网关 {gv['ip']} 无响应 —— 先修复链路，VPN 只是症状",
+                             f"The gateway {gv['ip']} on the tunnelled interface does not respond — "
+                             f"fix the link first; the VPN is only a symptom"))
             if kind == "dns":
-                return out("dns", "代理侧 DNS 失败",
-                           "请求已到隧道，但域名在隧道里解析不出来 —— 多半是节点 DNS 配置")
-            return out("vpn", "VPN 隧道/节点异常",
-                       f"链路正常、直连对照片可通，但经代理访问 {PROBE_HOST} 失败（{diag.label(kind)}）")
+                return out("dns", L("代理侧 DNS 失败", "DNS failure through the tunnel"),
+                           L("请求已到达隧道，但域名在隧道内无法解析 —— 多半是节点 DNS 配置",
+                             "The request reaches the tunnel, but the domain does not resolve "
+                             "inside it — most likely the node's DNS configuration"))
+            return out("vpn", L("VPN 隧道 / 节点异常", "VPN tunnel / node failure"),
+                       L(f"链路正常、直连对照可达，但经代理访问 {PROBE_HOST} 失败"
+                         f"（{diag.label(kind)}）",
+                         f"The link is fine and the direct control target is reachable, but "
+                         f"{PROBE_HOST} fails through the proxy ({diag.label(kind, 'en')})"))
 
-        # ③ 代理通、直连目标不通 → 这就是设计意图，不是故障
+        # ③ 代理通、直连目标不可达 → 这就是设计意图，不是故障
         if pd and not pd.get("ok"):
             if tun:
-                return out("target", "目标需要进出隧道",
-                           "TUN 已接管全部流量，直连探测其实也走了隧道；这里的不通不代表链路坏")
+                return out("target", L("目标需经隧道访问", "Target requires the tunnel"),
+                           L("TUN 已接管全部流量，直连探测实际也经过隧道；此处不可达不代表链路故障",
+                             "TUN captures all traffic, so the direct probe also went through the "
+                             "tunnel; unreachable here does not mean a broken link"))
             bn = by_nic.get("direct") or {}
-            extra = (f"；绑 {lane_name(rd)} 直接握手也不通（{diag.label(bn.get('kind') or 'unknown')}）"
-                     if bn and not bn.get("ok") else "")
-            return out("target", "目标被墙，代理正常",
-                       f"对照片和代理通道都通，只有直连 {PROBE_HOST} 不通 —— 正常现象{extra}")
+            extra = ""
+            extra_en = ""
+            if bn and not bn.get("ok"):
+                extra = (f"；绑定 {lane(rd, 'zh')} 直接握手也不通（{diag.label(bn.get('kind') or 'unknown')}）")
+                extra_en = (f"; a handshake bound to {lane(rd, 'en')} also fails "
+                            f"({diag.label(bn.get('kind') or 'unknown', 'en')})")
+            return out("target", L("目标被墙，代理正常", "Target blocked; proxy healthy"),
+                       L(f"对照与代理通道均可达，仅直连 {PROBE_HOST} 不可达 —— 属正常现象{extra}",
+                         f"Both the control target and the proxy path are reachable; only direct "
+                         f"access to {PROBE_HOST} fails — this is expected{extra_en}"))
 
-        return out("ok", "链路正常", f"对照、直连、代理三条路都通，没发现异常")
+        return out("ok", L("链路正常", "All paths healthy"),
+                   L("对照、直连、代理三条路径均可达，未发现异常",
+                     "Control, direct and proxy paths are all reachable; no anomaly detected"))
 
     def probe_loop(self, stop: threading.Event):
         """代理通道：快，驱动探测条与出口 IP"""
@@ -1345,7 +1600,7 @@ class Collector:
                 self.probes["direct"] = {**http_get(PROBE_TARGET, None, timeout=3),
                                          "ts": time.time(), "target": PROBE_TARGET}
                 self.probes["control"] = {**http_get(CONTROL_URL, None, timeout=4),
-                                          "ts": time.time(), "target": "baidu.com"}
+                                          "ts": time.time(), "target": CONTROL_HOST}
                 self._link_probe()
             except Exception as e:
                 log("direct:", e)
@@ -1359,29 +1614,37 @@ class Collector:
                 hint = ""
                 if cli.flow == "xray" and cli.metrics:
                     ok = self.sample_xray()
-                    hint = f"{cli.name or '客户端'} 的统计口 {cli.metrics} 没响应"
+                    hint = L(f"{cli.name or '客户端'} 的统计口 {cli.metrics} 无响应",
+                             f"the stats endpoint {cli.metrics} of {cli.name or 'the client'} "
+                             f"did not respond")
                 elif not cli.name or cli.kind == "none":
                     # 没有任何代理客户端在跑 —— 不是"没数据"，是换一种数法
                     ok = self.sample_host() or True
                 else:
                     ok = self.sample()
                     # 说清是"哪一环读不到"：v2rayN 关掉统计口时，控制器和代理口其实都好好的，
-                    # 再写"控制器没开"就是在冤枉它（issue #1）
+                    # 再写"控制器未开"就是在冤枉它（issue #1）
                     if cli.metrics:
-                        where = f"统计口 {cli.metrics} 没响应"
+                        where = L(f"统计口 {cli.metrics} 无响应",
+                                  f"the stats endpoint {cli.metrics} did not respond")
                     elif cli.api:
-                        where = f"控制器 {cli.api} 没响应"
+                        where = L(f"控制器 {cli.api} 无响应",
+                                  f"the controller {cli.api} did not respond")
                     elif cli.kind in ("v2ray", "xray"):
-                        where = "它的统计来源没开"
+                        where = L("其统计来源未开启", "its statistics source is off")
                     else:
-                        where = "它不提供字节统计"
-                    hint = f"{cli.name} 在跑，但读不到它的流量（{where}）"
+                        where = L("它不提供字节统计", "it provides no byte counters")
+                    hint = L(f"{cli.name} 在运行，但读不到它的流量（{where['zh']}）",
+                             f"{cli.name} is running, but its traffic cannot be read ({where['en']})")
                 if not ok:
                     # 客户端在、数读不到：退回网卡统计，别让面板停在错误上不动
                     self.sample_host(hint=hint)
             except Exception as e:
                 log("sample:", e)
-            stop.wait(max(0.05, 1.0 - (time.time() - t0)))
+            d = time.time() - t0
+            # 采一帧就花了 0.35 秒以上（本机模式要枚举连接/进程）就别催它：
+            # 跑不赢的节奏会把 CPU 占满，退回 1 秒
+            stop.wait(max(0.05, (1.0 if d > 0.35 else SAMPLE_EVERY) - d))
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1415,10 +1678,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, "缺少 web/index.html", "text/plain; charset=utf-8")
             return
         if p == "/api/state":
-            snap, _ = ST.read()
-            self._send(200, json.dumps(snap, ensure_ascii=False))
+            blob, _ = ST.read_blob()
+            self._send(200, blob)
             return
         if p == "/api/stream":
+            # SSE 是每秒一小段，别让 Nagle 攒包：攒一下面板就晚几百毫秒，连着攒就像"卡住"
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -1427,10 +1695,10 @@ class Handler(BaseHTTPRequestHandler):
             last = -1
             try:
                 while True:
-                    snap, ver = ST.read()
-                    if ver != last and snap:
+                    blob, ver = ST.read_blob()
+                    if ver != last and ver:      # 一帧都还没采到就别发空的 {} 给面板
                         last = ver
-                        self.wfile.write(f"data: {json.dumps(snap, ensure_ascii=False)}\n\n".encode())
+                        self.wfile.write(b"data: " + blob + b"\n\n")
                         self.wfile.flush()
                     else:
                         time.sleep(0.2)
@@ -1443,14 +1711,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = self.path.split("?")[0]
-        if p != "/api/sites":
-            self._send(404, json.dumps({"error": "not found"}))
-            return
         try:
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads((self.rfile.read(n) or b"{}").decode("utf-8", "replace"))
         except Exception:
             body = {}
+        if p == "/api/probe":
+            ok, msg = set_probe(target=body.get("target"), control=body.get("control"),
+                                interval=body.get("interval"))
+            self._send(200 if ok else 400,
+                       json.dumps({"ok": ok, "msg": msg,
+                                   "probe": {"target": PROBE_TARGET, "host": PROBE_HOST,
+                                             "control": CONTROL_HOST,
+                                             "control_url": CONTROL_URL,
+                                             "interval": PROBE_EVERY,
+                                             "min": PROBE_MIN, "max": PROBE_MAX}},
+                                  ensure_ascii=False))
+            return
+        if p != "/api/sites":
+            self._send(404, json.dumps({"error": "not found"}))
+            return
         ok, msg, cur = set_site(str(body.get("action", "")), str(body.get("domain", "")))
         self._send(200 if ok else 400,
                    json.dumps({"ok": ok, "msg": msg, "sites": cur}, ensure_ascii=False))

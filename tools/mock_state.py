@@ -27,38 +27,77 @@ HOST = (os.environ.get('MOCK_HOST') == '1') or LOOP
 ELEV = (os.environ.get('MOCK_ELEV') == '1') or LOOP
 # 演示"VPN 关掉之后"：第 N 次请求之后转成直连（曲线上的琥珀段应该留在左边、往左滑出去）
 OFF_AT = int(os.environ.get('MOCK_OFF_AT', '0') or 0)
+# 演示"采集器被 kill"：第 N 次请求之后一句不回就断连接（顶栏该出「采集器未连接」）
+DIE_AT = int(os.environ.get('MOCK_DIE_AT', '0') or 0)
 
 # 诊断结论的几种样子，截图时用 MOCK_DIAG 选：ok / target / vpn / link / dns / nopx / loop
 DIAG = os.environ.get("MOCK_DIAG", "loop" if LOOP else "nopx" if HOST else "target")
+def L(zh, en):
+    """和 server.py 一样：面板上的一句话，中英两版"""
+    return {"zh": zh, "en": en}
+
+
 DIAG_CASES = {
-    "ok": {"state": "ok", "label": "链路正常", "tun": False,
-           "why": "对照、直连、代理三条路都通，没发现异常",
-           "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 通 812ms",
-                        "代理通道 通", "网关 192.168.1.1（以太网）响应"]},
-    "target": {"state": "target", "label": "目标被墙，代理正常", "tun": False,
-               "why": "对照片和代理通道都通，只有直连 chatgpt.com 不通 —— 正常现象",
-               "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 不通（超时）",
-                            "代理通道 通", "网关 192.168.1.1（以太网）响应"]},
-    "vpn": {"state": "vpn", "label": "VPN 隧道/节点异常", "tun": False,
-            "why": "链路正常、直连对照片可通，但经代理访问 chatgpt.com 失败（超时）",
-            "evidence": ["对照 www.baidu.com 通 42ms", "直连 chatgpt.com 不通（超时）",
-                         "代理通道 不通（超时）", "网关 192.168.1.1（以太网）响应"]},
-    "link": {"state": "link", "label": "WLAN 链路不通", "tun": False,
-             "why": "连对照片都打不开，而且这块网卡的网关 192.168.1.1 不响应 —— 先查网线 / Wi-Fi 连接、路由器，不是 VPN 的事",
-             "evidence": ["对照 www.baidu.com 不通（超时）", "直连 chatgpt.com 不通（超时）",
-                          "代理通道 通", "网关 192.168.1.1（WLAN）无响应"]},
-    "dns": {"state": "dns", "label": "DNS 解析有问题", "tun": False,
-            "why": "网关在响应，但对照片域名解析不出来 —— 换 DNS 或检查 DNS 设置",
-            "evidence": ["对照 www.baidu.com 不通（DNS 解析失败）", "直连 chatgpt.com 不通（DNS 解析失败）",
-                         "代理通道 通", "网关 192.168.1.1（以太网）响应"]},
-    "nopx": {"state": "nopx", "label": "没有代理客户端，只看本机流量", "tun": False,
-             "why": "面板按网卡统计总流量、按连接数看谁在连谁（chatgpt.com 与 www.baidu.com 的探测照跑，"
-                    "只是不归因到 VPN）。逐域名的字节数需要客户端统计口",
-             "evidence": ["对照 www.baidu.com 通 58ms", "直连 chatgpt.com 不通（超时）"]},
-    "loop": {"state": "nopx", "label": "客户端在转发（经本地口计数）", "tun": False,
-             "why": "系统代理指向 127.0.0.1:10808，v2rayN 确实在转发；它的统计口没开，"
-                    "本地代理口上的回环连接能数出「进客户端」的字节，但那只是入口 —— "
-                    "其中多少进了隧道、多少按规则直连，读不到",
+    "ok": {"state": "ok",
+           "label": L("链路正常", "All paths healthy"),
+           "tun": False,
+           "why": L("对照、直连、代理三条路径均可达，未发现异常",
+                    "Control, direct and proxy paths are all reachable; no anomaly detected"),
+           "evidence": ["对照 www.baidu.com 可达 58ms", "直连 chatgpt.com 可达 812ms",
+                        "代理通道 可达", "网关 192.168.1.1（以太网）有响应"]},
+    "target": {"state": "target",
+               "label": L("目标被墙，代理正常", "Target blocked; proxy healthy"),
+               "tun": False,
+               "why": L("对照片与代理通道均可达，仅直连 chatgpt.com 不可达 —— 属正常现象",
+                        "Both the control target and the proxy path are reachable; only direct "
+                        "access to chatgpt.com fails — this is expected"),
+               "evidence": ["对照 www.baidu.com 可达 58ms", "直连 chatgpt.com 不可达（超时）",
+                            "代理通道 可达", "网关 192.168.1.1（以太网）有响应"]},
+    "vpn": {"state": "vpn",
+            "label": L("VPN 隧道 / 节点异常", "VPN tunnel / node failure"),
+            "tun": False,
+            "why": L("链路正常、直连对照可达，但经代理访问 chatgpt.com 失败（超时）",
+                     "The link is fine and the direct control target is reachable, but "
+                     "chatgpt.com fails through the proxy (timed out)"),
+            "evidence": ["对照 www.baidu.com 可达 42ms", "直连 chatgpt.com 不可达（超时）",
+                         "代理通道 不可达（超时）", "网关 192.168.1.1（以太网）有响应"]},
+    "link": {"state": "link",
+             "label": L("WLAN 链路不通", "WLAN link down"),
+             "tun": False,
+             "why": L("连对照目标都不可达，且该网卡的网关 192.168.1.1 无响应 —— "
+                      "先检查网线 / Wi-Fi 连接与路由器，与 VPN 无关",
+                      "Even the control target is unreachable, and the gateway 192.168.1.1 on "
+                      "this interface does not respond — check the cable / Wi-Fi and router "
+                      "first; this is not a VPN issue"),
+             "evidence": ["对照 www.baidu.com 不可达（超时）", "直连 chatgpt.com 不可达（超时）",
+                          "代理通道 可达", "网关 192.168.1.1（WLAN）无响应"]},
+    "dns": {"state": "dns",
+            "label": L("DNS 解析异常", "DNS resolution failing"),
+            "tun": False,
+            "why": L("网关有响应，但对照域名无法解析 —— 更换 DNS 或检查 DNS 设置",
+                     "The gateway responds, but the control domain does not resolve — change "
+                     "DNS or check DNS settings"),
+            "evidence": ["对照 www.baidu.com 不可达（DNS 解析失败）", "直连 chatgpt.com 不可达（DNS 解析失败）",
+                         "代理通道 可达", "网关 192.168.1.1（以太网）有响应"]},
+    "nopx": {"state": "nopx",
+             "label": L("没有代理客户端，仅统计本机流量", "No proxy client; local totals only"),
+             "tun": False,
+             "why": L("面板按网卡统计总流量、按连接数查看连接归属（chatgpt.com 与 www.baidu.com "
+                      "的探测照常运行，只是不归因于 VPN）。逐域名的字节数需客户端统计口",
+                      "The panel counts interface totals and shows connection ownership "
+                      "(chatgpt.com and www.baidu.com are still probed, just not attributed to "
+                      "the VPN). Per-domain byte counts need the client's stats API"),
+             "evidence": ["对照 www.baidu.com 可达 58ms", "直连 chatgpt.com 不可达（超时）"]},
+    "loop": {"state": "nopx",
+             "label": L("客户端在转发（经本地口计数）", "Client forwarding (local port)"),
+             "tun": False,
+             "why": L("系统代理指向 127.0.0.1:10808，v2rayN 确实在转发；其统计口未开启，"
+                      "本地代理口上的回环连接可数出「进入客户端」的字节，但那只是入口 —— "
+                      "其中多少进入隧道、多少按规则直连发出，无法读取",
+                      "System proxy points to 127.0.0.1:10808 and v2rayN is indeed forwarding; "
+                      "its stats endpoint is off. Loopback connections on its local proxy port "
+                      "give the bytes entering the client, but that is ingress only — how much "
+                      "enters the tunnel versus leaves directly by rule cannot be read"),
              "evidence": ["系统代理 127.0.0.1:10808（端口属于 v2rayN 的进程）",
                           "应用→代理口的回环 TCP 连接 6 条（eStats 差分）",
                           "入口字节 ≠ 隧道字节：客户端按规则可能直连放出一部分"]},
@@ -136,6 +175,9 @@ def snap(tick, off=False):
         "egress": {"vpn_ip": "203.0.113.24", "vpn_geo": "Japan", "vpn_ts": t - 20, "vpn_err": "",
                    "direct_ip": "198.51.100.9", "direct_geo": "China", "direct_ts": t - 90,
                    "direct_err": ""},
+        "probe": {"target": "https://chatgpt.com/", "host": "chatgpt.com",
+                  "control": "www.baidu.com", "control_url": "https://www.baidu.com/",
+                  "interval": 10, "min": 5, "max": 120},
         "probes": {"vpn": {"ok": True, "status": 200, "ms": 812, "ts": t - 4, "err": "", "kind": "", "body": ""},
                    "direct": {"ok": False, "status": 0, "ms": 3005, "ts": t - 4,
                               "err": "URLError", "kind": "timeout", "detail": "TimeoutError: timed out",
@@ -197,7 +239,7 @@ def snap(tick, off=False):
         out["client"] = {"kind": "none", "name": "", "core": "", "version": "", "api": "",
                          "config": "", "exe": "", "pid": 0, "mode": "", "nodes": 0,
                          "meta": False, "sub": {}}
-        out["path"] = {"active": "direct", "brief": "读不到它的流量 · 按网卡统计",
+        out["path"] = {"active": "direct", "brief": L("读不到它的流量 · 按网卡统计", "traffic unreadable · interface totals only"),
                        "reason": "没检测到代理客户端：按网卡「以太网」统计本机流量，"
                                  "逐域名/逐进程的字节数要客户端统计口或管理员权限才看得到",
                        "sysproxy": {"enable": 0, "server": ""}}
@@ -275,7 +317,9 @@ def snap(tick, off=False):
                              "meta": False, "flow": "xray", "metrics": "",
                              "local": "127.0.0.1:10808"}
             out["path"] = {
-                "active": "mixed", "brief": "在转发 · 经它的本地口计数，隧道份额未知",
+                "active": "mixed",
+                "brief": L("在转发 · 经其本地端口计数，隧道份额未知",
+                           "forwarding · counted at its local port, tunnel share unknown"),
                 "reason": ("系统代理已开启并指向 127.0.0.1:10808（v2rayN）：它确实在转发，"
                            "但没给字节统计（统计口没开），只能数「应用 → 它的本地口」"
                            "那条回环连接 —— 那是入口字节，其中多少进了隧道、多少被规则"
@@ -352,6 +396,9 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/state"):
             H.hits = getattr(H, "hits", 0) + 1
+            if DIE_AT and H.hits > DIE_AT:
+                self.close_connection = True    # 一句不回就断：等同采集器被 kill
+                return
             off = bool(OFF_AT and H.hits > OFF_AT)
             body = json.dumps(snap(int(time.time() * 2), off), ensure_ascii=False).encode()
             self.send_response(200)
@@ -365,6 +412,33 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        """演示用：面板上的 ✎ 改探测设置时别 404 —— 照单全收，回一句"已更新" """
+        n = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if self.path.startswith("/api/probe"):
+            cur = {"target": body.get("target") or "https://chatgpt.com/",
+                   "host": "chatgpt.com", "control": "www.baidu.com",
+                   "control_url": "https://www.baidu.com/",
+                   "interval": int(body.get("interval") or 10), "min": 5, "max": 120}
+            out = {"ok": True,
+                   "msg": {"zh": "探测设置已更新（演示数据，不会落盘）",
+                           "en": "Probe settings updated (demo only, not saved)"},
+                   "probe": cur}
+        elif self.path.startswith("/api/sites"):
+            out = {"ok": True, "msg": {"zh": "已更新（演示）", "en": "Updated (demo)"},
+                   "sites": body.get("domain") and [body["domain"]] or []}
+        else:
+            out = {"ok": False, "msg": {"zh": "演示服务只接口 /api/probe 与 /api/sites",
+                                        "en": "the demo server only handles /api/probe and /api/sites"}}
+        data = json.dumps(out, ensure_ascii=False).encode()
+        self.send_response(200 if out["ok"] else 404)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
 
 if __name__ == "__main__":

@@ -192,6 +192,34 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
 .site-form input{width:100%;font:11.5px/1.4 var(--mono);color:var(--text);background:#0b0e12;
   border:1px solid var(--line-2);border-radius:3px;padding:4px 8px}
 .site-form input:focus{border-color:#4a5464;outline:2px solid #3d4757;outline-offset:0}
+.mini.primary{color:#dfe4ea;border-color:#39424e;background:#1a1f26}
+.mini.primary:hover{border-color:#4a5464;background:#20262e}
+/* 语言切换：两个小按钮，选中那个用正文色 */
+.langsw{display:flex;gap:0;border:1px solid var(--line-2);border-radius:3px;overflow:hidden}
+.langsw button{font:10.5px/1 var(--mono);color:var(--dim-2);background:none;border:0;
+  padding:3px 6px;cursor:pointer;letter-spacing:.04em}
+.langsw button+button{border-left:1px solid var(--line-2)}
+.langsw button:hover{color:var(--dim)}
+.langsw button[aria-pressed="true"]{color:var(--text);background:#1c222a}
+/* 通道探测：每行名后面挂当前探测的主机名，改动后不用翻配置 */
+.prow .nm{display:flex;align-items:baseline;gap:5px;min-width:62px}
+.prow .nm .ph{font-family:var(--mono);font-size:9.5px;color:var(--dim-2);opacity:.85}
+.probe-form{margin:0 0 7px;display:grid;grid-template-columns:1fr;gap:5px 8px}
+.probe-form[hidden]{display:none}
+.probes .card-head,.probes .card-head .sites-ops{min-width:0}
+.probes .sites-ops{flex:1 1 auto;justify-content:flex-end;overflow:hidden}
+.probes .mini{flex:none}
+.probes .dg{min-width:0;max-width:100%}
+.dg .dgt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.probe-form label{display:flex;flex-direction:column;gap:3px;font-size:10px;color:var(--dim-2)}
+.probe-form label:nth-child(3) input{max-width:120px}
+.probe-form input{font:11px/1.4 var(--mono);color:var(--text);background:#0b0e12;
+  border:1px solid var(--line-2);border-radius:3px;padding:3px 7px;width:100%}
+.probe-form input:focus{border-color:#4a5464;outline:2px solid #3d4757;outline-offset:0}
+.pform-hint{grid-column:1/-1;font-size:10px;color:var(--dim-2);line-height:1.5}
+.pform-ops{grid-column:1/-1;display:flex;align-items:center;gap:7px;justify-content:flex-end}
+.pform-err{color:var(--bad);font-size:10px;margin-right:auto}
+.admin-note{color:var(--dim-2)}
 :where(button,input):focus-visible{outline:2px solid #55627a;outline-offset:1px}
 .site-del{opacity:0;font:11.5px/1 var(--ui);color:var(--dim-2);background:none;border:0;
   cursor:pointer;padding:0 1px;flex:none}
@@ -238,50 +266,54 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
 <main class="app">
 
   <div class="head">
-    <h1 class="brand"><b>FLOW</b><small>流量出口监视</small></h1>
+    <h1 class="brand"><b>FLOW</b><small data-i18n="brand">流量出口监视</small></h1>
     <div class="verdict" id="verdict" data-s="idle" aria-live="polite">
       <span class="dot"></span>
-      <span id="verdictText">连接中…</span>
+      <span id="verdictText" data-i18n="connecting">连接中…</span>
       <small id="verdictSub"></small>
     </div>
     <div class="grow"></div>
-    <span class="linkstale" id="linkState" hidden>采集器未连接</span>
+    <div class="langsw" role="group" aria-label="语言 / Language">
+      <button type="button" data-lang="zh" aria-pressed="true">中</button>
+      <button type="button" data-lang="en" aria-pressed="false">EN</button>
+    </div>
+    <span class="linkstale" id="linkState" hidden data-i18n="stale">采集器未连接</span>
     <div class="clock"><b id="clock">--:--:--</b><span id="uptime"></span></div>
   </div>
 
   <section class="card route">
-    <div class="card-head"><h2>出口路径</h2><span class="note" id="modeNote">—</span></div>
+    <div class="card-head"><h2 data-i18n="route">出口路径</h2><span class="note" id="modeNote">—</span></div>
 
     <div class="lanes">
       <article class="lane" id="laneVpn" data-kind="vpn" data-active="false">
         <div class="lane-head">
           <span class="badge vpn">VPN</span>
-          <span class="lane-title">代理隧道</span>
+          <span class="lane-title" data-i18n="laneVpn">代理隧道</span>
           <span class="lane-meta" id="vpnMeta">—</span>
         </div>
         <ol class="chain">
-          <li class="node"><span class="k">本机</span><span class="v" id="vpnLocal">—</span></li>
+          <li class="node"><span class="k" data-i18n="kLocal">本机</span><span class="v" id="vpnLocal">—</span></li>
           <li class="link"></li>
-          <li class="node"><span class="k">网卡</span><span class="v" id="vpnNic">—</span></li>
+          <li class="node"><span class="k" data-i18n="kNic">网卡</span><span class="v" id="vpnNic">—</span></li>
           <li class="link"></li>
-          <li class="node"><span class="k">节点</span><span class="v" id="vpnNode">—</span></li>
+          <li class="node"><span class="k" data-i18n="kNode">节点</span><span class="v" id="vpnNode">—</span></li>
           <li class="link"></li>
-          <li class="node"><span class="k">出口</span><span class="v ip" id="vpnExit">—</span></li>
+          <li class="node"><span class="k" data-i18n="kExit">出口</span><span class="v ip" id="vpnExit">—</span></li>
         </ol>
       </article>
 
       <article class="lane" id="laneDirect" data-kind="direct" data-active="false">
         <div class="lane-head">
-          <span class="badge direct">直连</span>
-          <span class="lane-title">不经代理</span>
+          <span class="badge direct" data-i18n="directBadge">直连</span>
+          <span class="lane-title" data-i18n="laneDirect">不经代理</span>
           <span class="lane-meta" id="dirMeta">—</span>
         </div>
         <ol class="chain">
-          <li class="node"><span class="k">本机</span><span class="v" id="dirLocal">—</span></li>
+          <li class="node"><span class="k" data-i18n="kLocal">本机</span><span class="v" id="dirLocal">—</span></li>
           <li class="link"></li>
-          <li class="node"><span class="k">网卡</span><span class="v" id="dirNic">—</span></li>
+          <li class="node"><span class="k" data-i18n="kNic">网卡</span><span class="v" id="dirNic">—</span></li>
           <li class="link"></li>
-          <li class="node"><span class="k">出口</span><span class="v ip" id="dirExit">—</span></li>
+          <li class="node"><span class="k" data-i18n="kExit">出口</span><span class="v ip" id="dirExit">—</span></li>
         </ol>
       </article>
     </div>
@@ -289,10 +321,10 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   </section>
 
   <section class="card throughput">
-    <div class="card-head"><h2>实时吞吐</h2><span class="note" id="tpNote">经隧道</span></div>
+    <div class="card-head"><h2 data-i18n="tp">实时吞吐</h2><span class="note" id="tpNote" data-i18n="tpTunnel">经隧道</span></div>
     <div class="rates">
-      <div class="rate dn"><div class="cap">↓ 下行</div><div class="val"><span id="dnRate">0</span><span class="unit" id="dnUnit">B/s</span></div></div>
-      <div class="rate up"><div class="cap">↑ 上行</div><div class="val"><span id="upRate">0</span><span class="unit" id="upUnit">B/s</span></div></div>
+      <div class="rate dn"><div class="cap" data-i18n="dn">↓ 下行</div><div class="val"><span id="dnRate">0</span><span class="unit" id="dnUnit">B/s</span></div></div>
+      <div class="rate up"><div class="cap" data-i18n="up">↑ 上行</div><div class="val"><span id="upRate">0</span><span class="unit" id="upUnit">B/s</span></div></div>
     </div>
     <div class="chart"><span class="scale" id="chartScale">—</span><svg id="mainSpark" viewBox="0 0 100 40" preserveAspectRatio="none">
       <line x1="0" y1="20" x2="100" y2="20" style="stroke:var(--line)" stroke-width="1" stroke-dasharray="2 4" vector-effect="non-scaling-stroke"/>
@@ -300,33 +332,56 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       <path id="upLine" fill="none" style="stroke:var(--up)" stroke-width="1" stroke-opacity=".85" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>
     </svg></div>
     <div class="totals">
-      <span><span id="dnTotalCap">本次</span> ↓ <b id="dnTotal">0 B</b></span>
-      <span><span id="upTotalCap">本次</span> ↑ <b id="upTotal">0 B</b></span>
-      <span>连接 <b id="connCount">0</b></span>
+      <span><span data-i18n="totalCap">累计</span> ↓ <b id="dnTotal">0 B</b></span>
+      <span><span data-i18n="totalCap">累计</span> ↑ <b id="upTotal">0 B</b></span>
+      <span><span data-i18n="conns">连接</span> <b id="connCount">0</b></span>
     </div>
   </section>
 
   <section class="card probes">
-    <div class="card-head"><h2>通道探测</h2><span class="dg" id="dgChip" data-s="idle">—</span></div>
-    <div class="prow"><span class="nm">代理通道</span><span class="pill idle" id="pvPill">—</span><span class="res" id="pvRes">—</span></div>
-    <div class="prow"><span class="nm">直连目标</span><span class="pill idle" id="pdPill">—</span><span class="res" id="pdRes">—</span></div>
-    <div class="prow"><span class="nm">直连对照</span><span class="pill idle" id="pcPill">—</span><span class="res" id="pcRes">—</span></div>
+    <div class="card-head">
+      <h2 data-i18n="probes">通道探测</h2>
+      <div class="sites-ops">
+        <span class="dg" id="dgChip" data-s="idle"><span class="dgt">—</span></span>
+        <button class="mini" id="probeCfgBtn" type="button" data-i18n-title="probesSet"
+                title="探测设置" aria-label="探测设置">✎</button>
+      </div>
+    </div>
+    <form class="probe-form" id="probeForm" hidden>
+      <label><span data-i18n="pTarget">探测目标</span>
+        <input id="pvTarget" type="text" inputmode="url" spellcheck="false" autocomplete="off"></label>
+      <label><span data-i18n="pControlT">对照目标</span>
+        <input id="pvControl" type="text" inputmode="url" spellcheck="false" autocomplete="off"></label>
+      <label><span data-i18n="pInterval">间隔（秒）</span>
+        <input id="pvInterval" type="number" min="5" max="120" step="1" inputmode="numeric"></label>
+      <div class="pform-hint" id="pvHint" data-i18n="pHint">探测目标应选「只有经隧道才可达」的站点，对照目标选本机一定可达的站点</div>
+      <div class="pform-ops">
+        <span class="pform-err" id="pvErr" hidden></span>
+        <button class="mini" id="pvCancel" type="button" data-i18n="pCancel">取消</button>
+        <button class="mini primary" id="pvSave" type="submit" data-i18n="pSave">保存</button>
+      </div>
+    </form>
+    <div class="prow"><span class="nm"><span data-i18n="pProxy">代理通道</span><small class="ph" id="pvHost"></small></span><span class="pill idle" id="pvPill">—</span><span class="res" id="pvRes">—</span></div>
+    <div class="prow"><span class="nm"><span data-i18n="pDirect">直连目标</span><small class="ph" id="pdHost"></small></span><span class="pill idle" id="pdPill">—</span><span class="res" id="pdRes">—</span></div>
+    <div class="prow"><span class="nm"><span data-i18n="pControl">直连对照</span><small class="ph" id="pcHost"></small></span><span class="pill idle" id="pcPill">—</span><span class="res" id="pcRes">—</span></div>
     <div class="strip">
-      <div class="lbl"><span>近 15 分钟</span><span id="stripStat">—</span></div>
+      <div class="lbl"><span data-i18n="pWindow">近 15 分钟</span><span id="stripStat">—</span></div>
       <svg id="stripSvg" viewBox="0 0 96 22" preserveAspectRatio="none"></svg>
     </div>
   </section>
 
   <section class="card sites">
     <div class="card-head">
-      <h2 id="siteTitle">站点</h2>
+      <h2 id="siteTitle" data-i18n="sites">站点</h2>
       <div class="sites-ops">
         <span class="note" id="siteNote">按域名归并 · 1s 采样</span>
-        <button class="mini" id="addSiteBtn" type="button" title="添加要盯的域名">＋ 域名</button>
+        <button class="mini" id="addSiteBtn" type="button" data-i18n="addSite"
+                data-i18n-title="addSiteTitle" title="添加监测域名">＋ 域名</button>
       </div>
     </div>
     <form class="site-form" id="siteForm" hidden>
-      <input id="siteInput" name="domain" type="text" inputmode="url" aria-label="要监测的域名"
+      <input id="siteInput" name="domain" type="text" inputmode="url" data-i18n-aria="siteAria"
+             aria-label="要监测的域名" data-i18n-ph="sitePh"
              placeholder="example.com · 回车添加，Esc 取消" autocomplete="off" spellcheck="false">
     </form>
     <div id="sites"></div>
@@ -344,7 +399,150 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   const $ = s => document.querySelector(s);
   const NS = "http://www.w3.org/2000/svg";
 
-  const HIST = 120;
+  /* ── 文案：简体中文 / English (UK) ──
+     面板自己的字用 T(key)；后端发来的句子自带两版（{zh,en}），用 txt() 取。
+     英文缺条目就退回中文 —— 宁可混着显示，也别让界面出现空白。 */
+  const I18N = {
+    zh: {
+      brand: "流量出口监视", connecting: "连接中…", stale: "采集器未连接",
+      staleAt: "采集器未连接 · 最后 %s", lost: "未连上采集器",
+      route: "出口路径", laneVpn: "代理隧道", laneDirect: "不经代理", directBadge: "直连",
+      kLocal: "本机", kNic: "网卡", kNode: "节点", kExit: "出口",
+      tp: "实时吞吐", tpTunnel: "经隧道", dn: "↓ 下行", up: "↑ 上行",
+      totalCap: "累计", conns: "连接",
+      probes: "通道探测", probesSet: "探测设置", pProxy: "代理通道", pDirect: "直连目标",
+      pControl: "直连对照", pWindow: "近 15 分钟", pStat: "%s/%s 成功", pWait: "采集中…",
+      pTarget: "探测目标", pControlT: "对照目标", pInterval: "间隔（秒）",
+      pSave: "保存", pCancel: "取消",
+      pHint: "探测目标应选「只有经隧道才可达」的站点，对照目标选本机一定可达的站点；保存后立即生效，无需重启采集器",
+      sites: "站点", procs: "进程", addSite: "＋ 域名", addSiteTitle: "添加监测域名",
+      sitePh: "example.com · 回车添加，Esc 取消", siteAria: "要监测的域名",
+      vpn: "经隧道", mixed: "部分经隧道", direct: "直连", down: "隧道统计不可读",
+      hostDirect: "本机直连", unknown: "未知",
+      subMixed: "系统代理未开启 · 仅显式设置代理的应用经隧道",
+      pending: "检测中", probing: "检测中",
+      fwdPx: "%s · 在转发 · 经本地端口计数", fwdNo: "%s · 流量不可读 · 仅按网卡统计",
+      noClient: "未检测到代理客户端 · 仅按网卡统计",
+      headFwdPx: "在转发 · 经本地端口计数", headFwd: "在转发 · 字节数不可读",
+      headOff: "隧道未承载流量", headXray: "统计口 %s", headStreams: "承载 %s 条",
+      headNoStreams: "未承载流量",
+      knobSys: "系统代理 → %s", knobOff: "隧道未启用 · TUN %s",
+      tunOn: "开", tunOff: "关", nodeTimeout: "节点超时",
+      tgtOk: "%s目标可达 %s", tgtBad: "%s目标不可达", ctlOk: " · 对照 %s", ctlBad: " · 对照不可达",
+      clientNone: "未检测到代理客户端", nodesN: " · %s 个节点", subUpdated: " · 订阅 %s 更新",
+      other: "其他", tagLocal: "本机", unitConns: "条", unitRemotes: "远端",
+      viaVpn: "VPN", viaDirect: "直连", viaClient: "经客户端", viaIdle: "空闲",
+      emptyHost: "当前没有已建立的 TCP 连接（刚启动请稍候）",
+      emptySites: "尚未监测任何域名 —— 点右上角「＋ 域名」添加，或点下方的域名标签",
+      peak: "峰值 %s %s",
+      splitProxy: "经代理 %s", splitDirect: "不经代理 %s",
+      nicTotal: "网卡总量", hostTotal: "本机网卡总量", tunnelDown: "隧道未连接，仅统计网卡",
+      adminRates: "管理员：逐进程速率", adminIngress: "管理员：逐进程速率 + 经客户端字节",
+      userOnly: "普通权限：仅统计连接", hostMode: "本机模式",
+      online: "在线", offline: "离线", ctrlLine: "控制器 %s · %s · %s",
+      sig: "信号 %s", gw: "网关 %s", directVia: " · 直连经 %s",
+      noteHost: "按进程归并 · %s · 管理员权限", noteNoBytes: "仅统计连接 · 不统计字节（需管理员权限）",
+      noteXray: "按出口归并 · %s", noteDomain: "按域名归并 · %s", sampleIv: "%s 秒采样",
+      toastUpdated: "已更新", toastFailed: "失败", toastOffline: "未连上本地服务",
+      addTitle: "点击加入监测：%s", delAria: "移除该域名", delTitle: "不再监测该域名",
+      connsN: "%s 条连接", remotesN: "%s 个远端",
+      hostTip: "本机模式不统计每行字节数（需客户端统计口或管理员权限）",
+      probeTipOff: "没有代理客户端，此通道不存在",
+      footConnHost: "本机已建立的 TCP 连接数（不含回环）",
+      footConnProxy: "经代理 %s 条 · 本机共 %s 条（不含回环）",
+      upTotalTip: "自面板启动以来这块网的累计下行 / 上行",
+      agoJust: "刚刚", agoMin: "%s 分钟前",
+      agoHour: "%s 小时前", agoDay: "%s 天前", uptime: "已运行 %s",
+      cum: "累计 ↓ %s  ↑ %s", ingressRow: "其中经过客户端本地口约 %s —— 入口字节，不代表都进入隧道",
+      viaClientRate: " · 经客户端 %s", off: "未启用",
+      tipNic: "网卡总量（含 UDP / QUIC）：↓%s ↑%s",
+      tipIngress: "经客户端（回环 eStats，TCP）：↓%s ↑%s",
+      tipIngressNote: "这是「应用 → 客户端本地口」的入口字节：其中多少进入隧道、多少按其规则直连发出，客户端不提供统计口时无法区分",
+      tipProxy: "经代理：↓%s ↑%s", tipDirect: "不经代理（估算）：↓%s ↑%s",
+      noRes: "失败",
+    },
+    en: {
+      brand: "Egress monitor", connecting: "Connecting…", stale: "Collector offline",
+      staleAt: "Collector offline · last %s", lost: "Collector unreachable",
+      route: "Egress path", laneVpn: "Proxy tunnel", laneDirect: "No proxy", directBadge: "Direct",
+      kLocal: "Host", kNic: "Interface", kNode: "Node", kExit: "Egress",
+      tp: "Throughput", tpTunnel: "Tunnelled", dn: "↓ Down", up: "↑ Up",
+      totalCap: "Total", conns: "Connections",
+      probes: "Probes", probesSet: "Probe settings", pProxy: "Proxy path",
+      pDirect: "Direct target", pControl: "Control target", pWindow: "Last 15 min",
+      pStat: "%s/%s ok", pWait: "Sampling…",
+      pTarget: "Probe target", pControlT: "Control target", pInterval: "Interval (s)",
+      pSave: "Save", pCancel: "Cancel",
+      pHint: "Pick a target reachable only through the tunnel, and a control target that is always reachable; changes apply immediately, no collector restart needed",
+      sites: "Sites", procs: "Processes", addSite: "＋ Domain", addSiteTitle: "Add a monitored domain",
+      sitePh: "example.com · Enter to add, Esc to cancel", siteAria: "Domain to monitor",
+      vpn: "Tunnelled", mixed: "Partly tunnelled", direct: "Direct", down: "Tunnel stats unreadable",
+      hostDirect: "Host direct", unknown: "Unknown",
+      subMixed: "System proxy off · only applications with an explicit proxy use the tunnel",
+      pending: "Probing", probing: "Probing",
+      fwdPx: "%s · forwarding · counted at the local port",
+      fwdNo: "%s · traffic unreadable · interface totals only",
+      noClient: "No proxy client detected · interface totals only",
+      headFwdPx: "forwarding · counted at local port", headFwd: "forwarding · byte counts unreadable",
+      headOff: "tunnel idle", headXray: "stats endpoint %s", headStreams: "%s streams",
+      headNoStreams: "no traffic",
+      knobSys: "system proxy → %s", knobOff: "tunnel off · TUN %s",
+      tunOn: "on", tunOff: "off", nodeTimeout: "node timeout",
+      tgtOk: "%starget reachable %s", tgtBad: "%starget unreachable", ctlOk: " · control %s",
+      ctlBad: " · control unreachable",
+      clientNone: "no proxy client detected", nodesN: " · %s nodes", subUpdated: " · subscription updated %s",
+      other: "Other", tagLocal: "Host", unitConns: "conns", unitRemotes: "remotes",
+      viaVpn: "VPN", viaDirect: "Direct", viaClient: "via client", viaIdle: "idle",
+      emptyHost: "No established TCP connections right now (wait a moment after start-up)",
+      emptySites: "No domains monitored yet — use ‘＋ Domain’ above, or pick a tag below",
+      peak: "Peak %s %s",
+      splitProxy: "via proxy %s", splitDirect: "direct %s",
+      nicTotal: "interface total", hostTotal: "local interface total",
+      tunnelDown: "tunnel offline; interface totals only",
+      adminRates: "Administrator: per-process rates",
+      adminIngress: "Administrator: per-process rates + client ingress bytes",
+      userOnly: "Standard rights: connections only", hostMode: "Host mode",
+      online: "online", offline: "offline", ctrlLine: "controller %s · %s · %s",
+      sig: "signal %s", gw: "gateway %s", directVia: " · direct via %s",
+      noteHost: "grouped by process · %s · administrator",
+      noteNoBytes: "connections only · no byte counts (needs administrator rights)",
+      noteXray: "grouped by egress · %s", noteDomain: "grouped by domain · %s",
+      sampleIv: "%ss sampling",
+      toastUpdated: "Updated", toastFailed: "Failed", toastOffline: "Local service unreachable",
+      addTitle: "Click to monitor: %s", delAria: "Remove this domain", delTitle: "Stop monitoring this domain",
+      connsN: "%s connections", remotesN: "%s remotes",
+      hostTip: "Host mode does not count per-row bytes (needs the client's stats API or administrator rights)",
+      probeTipOff: "No proxy client; this path does not exist",
+      footConnHost: "established TCP connections on this host (loopback excluded)",
+      footConnProxy: "via proxy %s · %s on this host (loopback excluded)",
+      upTotalTip: "interface totals since the panel started",
+      agoJust: "just now", agoMin: "%s min ago",
+      agoHour: "%s h ago", agoDay: "%s d ago", uptime: "up %s",
+      cum: "total ↓ %s  ↑ %s", ingressRow: "about %s entered the client's local port — ingress, not necessarily tunnelled",
+      viaClientRate: " · via client %s", off: "disabled",
+      tipNic: "Interface total (incl. UDP / QUIC): ↓%s ↑%s",
+      tipIngress: "Via client (loopback eStats, TCP): ↓%s ↑%s",
+      tipIngressNote: "bytes from applications to the client's local port: how much enters the tunnel versus leaves directly by rule cannot be told without the client's stats API",
+      tipProxy: "Via proxy: ↓%s ↑%s", tipDirect: "Direct (estimated): ↓%s ↑%s",
+      noRes: "failed",
+    },
+  };
+  const savedLang = (localStorage.getItem("flow.lang") || "").toLowerCase();
+  const qLang = (new URLSearchParams(location.search).get("lang") || "").toLowerCase();
+  let LANG = qLang === "en" || qLang === "zh" ? qLang
+    : savedLang === "en" || savedLang === "zh" ? savedLang
+    : ((navigator.language || "").toLowerCase().startsWith("en") ? "en" : "zh");
+  // T：面板自己的文案；%s 依次替换
+  const T = (k, ...a) => {
+    let s = I18N[LANG]?.[k] ?? I18N.zh[k] ?? k;
+    for (const v of a) s = s.replace("%s", v);
+    return s;
+  };
+  // txt：后端那句 {zh,en}；老字段（纯字符串）原样返回
+  const txt = v => (v == null ? "" : typeof v === "string" ? v : (v[LANG] || v.zh || ""));
+  let lastSnap = null;
+
+  const HIST = 240;         // 后端 0.5 秒一帧：240 帧 ≈ 2 分钟
   const hist = { total: [], vpnSites: new Map() };
   let strip = [];
   let hostMode = false;
@@ -368,14 +566,46 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   // 判定 → 曲线颜色：vpn/mixed 琥珀、direct 青、其它灰（历史按当时判定留色）
   const toneOf = a => (a === "vpn" || a === "mixed") ? "vpn" : a === "direct" ? "dir" : "dim";
   const fmtBytes = v => { const [n, u] = split(v); return n + " " + u; };
-  const fmtMs = ms => (ms == null ? "—" : ms < 0 ? "不通" : ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(2) + " s");
-  // 服务端把病因分好了类，这里只负责翻成人话（比显示 URLError 有用得多）
-  const KIND_CN = { dns: "DNS 失败", refused: "拒绝连接", reset: "连接重置", timeout: "超时",
-    unreach: "不可达", tls: "TLS 错误", http: "HTTP 错误", bind: "绑不上网卡",
-    offline: "无网络", unknown: "未知" };
-  const kindCn = k => KIND_CN[k] || "失败";
-  const hhmmss = t => new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+  const fmtMs = ms => (ms == null ? "—" : ms < 0 ? (LANG === "en" ? "unreachable" : "不通")
+    : ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(2) + " s");
+  // 服务端把病因分好了类，这里只负责翻成一句人话（比显示 URLError 有用得多）
+  const KIND = {
+    zh: { dns: "DNS 解析失败", refused: "拒绝连接", reset: "连接重置", timeout: "超时",
+      unreach: "不可达", tls: "TLS 错误", http: "HTTP 错误", bind: "绑不上网卡",
+      offline: "无网络", unknown: "未知" },
+    en: { dns: "DNS failure", refused: "Refused", reset: "Reset", timeout: "Timed out",
+      unreach: "Unreachable", tls: "TLS error", http: "HTTP error", bind: "Bind failed",
+      offline: "No network", unknown: "Unknown" },
+  };
+  const kindCn = k => (KIND[LANG] || KIND.zh)[k] || T("noRes");
+  const hhmmss = t => new Date(t * 1000).toLocaleTimeString(LANG === "en" ? "en-GB" : "zh-CN", { hour12: false });
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  /* ── 语言切换 ──
+     静态字靠 data-i18n* 属性重写；动态字不缓存，拿最后一帧快照重画一遍。
+     语言存在 localStorage：刷新、重开面板都记得住。 */
+  function applyI18n() {
+    document.documentElement.lang = LANG === "en" ? "en-GB" : "zh-CN";
+    document.title = LANG === "en" ? "FLOW · Traffic egress" : "FLOW · 流量出口";
+    document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = T(el.dataset.i18n); });
+    document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = T(el.dataset.i18nTitle); });
+    document.querySelectorAll("[data-i18n-ph]").forEach(el => { el.placeholder = T(el.dataset.i18nPh); });
+    document.querySelectorAll("[data-i18n-aria]").forEach(el => { el.setAttribute("aria-label", T(el.dataset.i18nAria)); });
+    document.querySelectorAll(".langsw button").forEach(b => {
+      b.setAttribute("aria-pressed", String(b.dataset.lang === LANG));
+    });
+    if (lastSnap) { try { render(lastSnap); } catch (e) { console.warn("render:", e); } }
+    try { renderStrip(); } catch (e) { /* 还没数据就这样 */ }
+  }
+  function setLang(l) {
+    if (l !== "zh" && l !== "en") return;
+    LANG = l;
+    try { localStorage.setItem("flow.lang", l); } catch (e) { /* 隐私模式下写不进去，无所谓 */ }
+    applyI18n();
+  }
+  document.querySelectorAll(".langsw button").forEach(b => {
+    b.addEventListener("click", () => setLang(b.dataset.lang));
+  });
 
   /* ── 迷你曲线 ── */
   function buildPath(vals, w, h, max, close) {
@@ -410,6 +640,32 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   /* 颜色跟着"那一刻"走，不是跟着"此刻"走。
      VPN 关掉之后：琥珀不再长新点（新点按当时状态上色），旧点留在原地，
      窗口继续往前滚，于是那段曲线整体向左移出去 —— 而不是整条线瞬间变色或消失。 */
+  // 采样是离散的点，直接连线是折线、还一秒跳一格。单调三次插值把点之间补圆，
+  // 又不会冲过头：局部极值处切线归零，尖峰不会被拉成负值或虚高（速率曲线最怕这个）
+  function smoothPath(xs, ys) {
+    const n = xs.length;
+    if (n < 2) return "";
+    if (n === 2) return `M${xs[0].toFixed(2)} ${ys[0].toFixed(2)}L${xs[1].toFixed(2)} ${ys[1].toFixed(2)}`;
+    const d = [], m = new Array(n);
+    for (let i = 1; i < n; i++) d[i - 1] = (ys[i] - ys[i - 1]) / (xs[i] - xs[i - 1]);
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for (let i = 1; i < n - 1; i++) m[i] = (d[i - 1] + d[i]) / 2;
+    for (let i = 0; i < n - 1; i++) {
+      if (Math.abs(d[i]) < 1e-9) { m[i] = 0; m[i + 1] = 0; continue; }
+      const a = m[i] / d[i], b = m[i + 1] / d[i], sq = a * a + b * b;
+      if (sq > 9) { const t = 3 / Math.sqrt(sq); m[i] = t * a * d[i]; m[i + 1] = t * b * d[i]; }
+    }
+    let p = `M${xs[0].toFixed(2)} ${ys[0].toFixed(2)}`;
+    for (let i = 0; i < n - 1; i++) {
+      const dx = (xs[i + 1] - xs[i]) / 3;
+      p += "C" + (xs[i] + dx).toFixed(2) + " " + (ys[i] + m[i] * dx).toFixed(2) +
+           " " + (xs[i + 1] - dx).toFixed(2) + " " + (ys[i + 1] - m[i + 1] * dx).toFixed(2) +
+           " " + xs[i + 1].toFixed(2) + " " + ys[i + 1].toFixed(2);
+    }
+    return p;
+  }
+
   function renderMainChart() {
     const h = hist.total;
     if (h.length < 2) return;
@@ -439,21 +695,17 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       while (end < n && tones[end] === tone) end++;
       if (end - start >= 2) {
         const [col, alpha] = TONE[tone];
-        let line = "", area = "";
-        for (let i = start; i < end; i++) {
-          const x = (i * step).toFixed(2);
-          const y = yOf(h[i].d);
-          line += (i > start ? "L" : "M") + x + " " + y;
-          area += (i > start ? "L" : "M") + x + " " + y;
-        }
-        const xa = (start * step).toFixed(2), xb = ((end - 1) * step).toFixed(2);
+        const xs = [], ys = [];
+        for (let i = start; i < end; i++) { xs.push(i * step); ys.push(+yOf(h[i].d)); }
+        const curve = smoothPath(xs, ys);
+        const xa = xs[0].toFixed(2), xb = xs[xs.length - 1].toFixed(2);
         const a = document.createElementNS(SVGNS, "path");
-        a.setAttribute("d", area + `L${xb} 38L${xa} 38Z`);
+        a.setAttribute("d", curve + `L${xb} 38L${xa} 38Z`);
         a.setAttribute("fill", col);
         a.setAttribute("fill-opacity", alpha);
         g.appendChild(a);
         const l = document.createElementNS(SVGNS, "path");
-        l.setAttribute("d", line);
+        l.setAttribute("d", curve);
         l.setAttribute("fill", "none");
         l.setAttribute("stroke", col);
         l.setAttribute("stroke-width", "1.4");
@@ -465,9 +717,11 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     }
 
     const user = h.map(p => p.u), umax = Math.max(...user);
-    $("#upLine").setAttribute("d", umax > max * 0.02 ? buildPath(user, 100, 40, max, false) : "");
+    const usx = user.map((_, i) => i * (100 / Math.max(1, user.length - 1)));
+    const usy = user.map(v => 38 - Math.min(1, v / max) * 35.5);
+    $("#upLine").setAttribute("d", umax > max * 0.02 ? smoothPath(usx, usy) : "");
     const [pn, pu] = fmtRate(Math.max(peak, umax));
-    $("#chartScale").textContent = "峰值 " + pn + " " + pu;
+    $("#chartScale").textContent = T("peak", pn, pu);
   }
 
   /* ── 探测条 ── */
@@ -485,7 +739,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     svg.innerHTML = out;
     const ok = strip.filter(s => s.v).length;
     const tail = probeStamp ? ` · ${probeStamp}` : "";
-    $("#stripStat").textContent = strip.length ? `${ok}/${strip.length} 成功${tail}` : "采集中…";
+    $("#stripStat").textContent = strip.length ? T("pStat", ok, strip.length) + tail : T("pWait");
   }
 
   // 软件里的节点名常带 node_12_ 前缀和 "| CM CU" 后缀，链路里只留认得出的部分
@@ -496,10 +750,10 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   function ago(ts) {
     const d = Date.now() / 1000 - ts;
     if (!ts || d < 0) return "";
-    if (d < 60) return "刚刚";
-    if (d < 3600) return Math.floor(d / 60) + " 分钟前";
-    if (d < 86400) return Math.floor(d / 3600) + " 小时前";
-    return Math.floor(d / 86400) + " 天前";
+    if (d < 60) return T("agoJust");
+    if (d < 3600) return T("agoMin", Math.floor(d / 60));
+    if (d < 86400) return T("agoHour", Math.floor(d / 3600));
+    return T("agoDay", Math.floor(d / 86400));
   }
 
   /* ── 站点行 ── */
@@ -512,7 +766,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       <div class="site-id">
         <span class="site-name">${esc(key)}</span>
         <span class="tag" data-via="idle">—</span>
-        <button class="site-del" type="button" aria-label="移除这个域名" title="不再监测这个域名">×</button>
+        <button class="site-del" type="button" aria-label="${T("delAria")}" title="${T("delTitle")}">×</button>
       </div>
       <div class="site-spark"><svg viewBox="0 0 100 30" preserveAspectRatio="none">
         <path class="f" fill="url(#gSite)" d=""/>
@@ -546,7 +800,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   function renderSites(sites) {
     const seen = new Set();
     for (const s of sites) {
-      const key = s.key === "other" ? "其他" : s.label;
+      const key = s.key === "other" ? T("other") : s.label;
       seen.add(key);
       const r = ensureRow(key);
       if (hostMode && !hostBytes) {
@@ -554,17 +808,17 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
         r.del.hidden = true;
         r.f.setAttribute("d", ""); r.a.setAttribute("d", ""); r.b.setAttribute("d", "");
         r.tag.dataset.via = "direct";
-        r.tag.textContent = "本机";
+        r.tag.textContent = T("tagLocal");
         r.tag.hidden = true;      // 整张表都是本机进程，再挂个"本机"标签是废话
         r.d.textContent = s.conns || 0;
-        r.du.textContent = "条";
+        r.du.textContent = T("unitConns");
         r.u.textContent = s.remotes || 0;
-        r.uu.textContent = "远端";
+        r.uu.textContent = T("unitRemotes");
         r.dn.classList.remove("idle");
         r.up.classList.remove("idle");
-        r.el.title = `${s.label} · ${s.conns} 条连接 · ${s.remotes} 个远端`
-          + (s.sample ? `\n例：${s.sample}` : "")
-          + "\n本机模式不统计每行字节数（要客户端统计口或管理员权限）";
+        r.el.title = `${s.label} · ${T("connsN", s.conns)} · ${T("remotesN", s.remotes)}`
+          + (s.sample ? `\n${s.sample}` : "")
+          + "\n" + T("hostTip");
         continue;
       }
       const hk = s.fixed ? s.key : key;    // 固定行（经代理/直连）的历史按 key 存，和后端一致
@@ -594,8 +848,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
         : via === "direct" ? "rgba(95,173,165,.11)"
           : via === "proxy" ? "rgba(142,151,168,.10)" : "rgba(223,227,232,.05)";
       r.tag.dataset.via = via;
-      r.tag.textContent = via === "vpn" ? "VPN" : via === "direct" ? "直连"
-        : via === "proxy" ? "经客户端" : "空闲";
+      r.tag.textContent = via === "vpn" ? T("viaVpn") : via === "direct" ? T("viaDirect")
+        : via === "proxy" ? T("viaClient") : T("viaIdle");
       // 本机模式下每行都是本机进程，"直连/空闲"标签是废话
       r.tag.hidden = hostMode || r.tag.textContent === s.label;
       const [dn, dnu] = fmtRate(s.down);
@@ -607,13 +861,14 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       r.dn.classList.toggle("idle", !s.down);
       r.up.classList.toggle("idle", !s.up);
       r.el.title = s.fixed
-        ? `${s.label} · 累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`
-        : `${s.label} · ${s.conns} 条连接${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}\n累计 ↓ ${fmtBytes(s.total_down)}  ↑ ${fmtBytes(s.total_up)}`;
+        ? `${s.label} · ${T("cum", fmtBytes(s.total_down), fmtBytes(s.total_up))}`
+        : `${s.label} · ${T("connsN", s.conns)}${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}`
+          + `\n${T("cum", fmtBytes(s.total_down), fmtBytes(s.total_up))}`;
       // 本机模式下这行有这么一部分是"进了客户端本地口"的：说清来源，
       // 也别说成"走了隧道"——入口字节里可能有一部分被规则直连放出去
       if (hostMode && s.px > 0) {
-        r.el.title += `\n其中经过客户端本地口约 ${fmtRate(s.px)[0]} ${fmtRate(s.px)[1]}`
-          + "（数的是它连本地代理口那条回环连接；入口字节，不代表都进了隧道）";
+        const [pn, pu] = fmtRate(s.px);
+        r.el.title += `\n${T("ingressRow", pn + " " + pu)}`;
       }
     }
     for (const [key, r] of rowCache) {
@@ -625,11 +880,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       if (!empty) {
         empty = document.createElement("div");
         empty.className = "sites-empty";
-        empty.textContent = hostMode
-          ? "现在没有已建立的 TCP 连接（刚启动的话等一秒）"
-          : "还没盯任何域名 —— 点右上角「＋ 域名」添加，或点下面的趋势标签";
         box.appendChild(empty);
       }
+      empty.textContent = hostMode ? T("emptyHost") : T("emptySites");
     } else if (empty) {
       empty.remove();
     }
@@ -674,21 +927,19 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
 
     const vd = $("#verdict");
     vd.dataset.s = active;
-    const label = { vpn: "走 VPN", direct: "直连", mixed: "部分走 VPN", down: "隧道读不到" }[active] || "未知";
+    const label = { vpn: T("vpn"), direct: T("direct"), mixed: T("mixed"), down: T("down") }[active] || T("unknown");
     $("#verdictText").textContent = label;
     $("#verdictSub").textContent = active === "vpn" && node.name
-      ? `${nodeLabel(node.name)} · ${eg.vpn_ip || "出口待测"}`
-      : active === "mixed" ? "系统代理未开 · 仅显式代理的程序经隧道"
+      ? `${nodeLabel(node.name)} · ${eg.vpn_ip || T("pending")}`
+      : active === "mixed" ? T("subMixed")
         : active === "direct" ? (eg.direct_ip || "") : "";
     if (isHost) {
       // 本机模式下的措辞以后端为准（p.brief）：可能真没在用隧道，
       // 也可能是客户端在转发、只是没给字节数 —— 后者绝不能写成"没在转发"（issue #1）
       const cliName = (s.client || {}).name || "";
-      $("#verdictText").textContent = active === "mixed" ? "部分走 VPN" : "本机直连";
-      $("#verdictSub").textContent = p.brief
-        || (cliName ? (pxHost ? `${cliName} · 在转发 · 经它的本地口计数`
-                              : `${cliName} · 读不到它的流量 · 按网卡统计`)
-                    : "没检测到代理客户端 · 按网卡统计");
+      $("#verdictText").textContent = active === "mixed" ? T("mixed") : T("hostDirect");
+      $("#verdictSub").textContent = txt(p.brief)
+        || (cliName ? (pxHost ? T("fwdPx", cliName) : T("fwdNo", cliName)) : T("noClient"));
     }
 
     /* 路径 A：VPN */
@@ -701,7 +952,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     $("#vpnNode").textContent = node.name ? nodeLabel(node.name)
       : (node.server ? shortServer(node.server) : "—");
     $("#vpnNode").title = node.server ? `${node.name || ""} ${node.server}:${node.port}`.trim() : "";
-    $("#vpnExit").textContent = eg.vpn_ip || "待测";
+    $("#vpnExit").textContent = eg.vpn_ip || T("pending");
     const conns = (s.tunnel || {}).conns || 0;
     const tn2 = s.tunnel || {};
     const isXray = isX;
@@ -709,46 +960,49 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     // 没有连接表时"承载 N 条"和"rule 模式"都是空话，换成它真正能说的
     // 本机模式下连"隧道有没有承载"都读不到：只能说客户端是否在转发、字节数不可读
     const spServer = String((p.sysproxy || {}).server || "").split(";")[0].replace(/^[a-z]+=/, "");
+    const tunTxt = tn2.tun ? T("tunOn") : T("tunOff");
     const head = isHost
       ? (active === "mixed"
-          ? (pxHost ? `<span class="on">在转发 · 经本地口计数</span>`
-                    : `<span class="on">在转发 · 字节数不可读</span>`)
-          : `<span class="off">隧道未承载</span>`)
+          ? (pxHost ? `<span class="on">${T("headFwdPx")}</span>`
+                    : `<span class="on">${T("headFwd")}</span>`)
+          : `<span class="off">${T("headOff")}</span>`)
       : isXray
-        ? `<span class="on">统计口 ${(cli.metrics || "").split(":")[1] || "—"}</span>`
-        : `<span class="on">承载 ${conns} 条</span>`;
+        ? `<span class="on">${T("headXray", (cli.metrics || "").split(":")[1] || "—")}</span>`
+        : `<span class="on">${T("headStreams", conns)}</span>`;
     const knobs = isHost
       ? (active === "mixed"
-          ? `系统代理 → ${spServer || "客户端本地口"}`
-          : `隧道未启用 · TUN ${tn2.tun ? "开" : "关"}`)
-      : `${isXray ? (cli.name || "内核") : (cli.mode || "?")} · TUN ${tn2.tun ? "开" : "关"}`;
-    const rtt = !node.rtt ? "" : node.rtt < 0 ? " · 节点超时" : ` · ${node.rtt}ms`;
+          ? T("knobSys", spServer || (LANG === "en" ? "client local port" : "客户端本地口"))
+          : T("knobOff", tunTxt))
+      : `${isXray ? (cli.name || (LANG === "en" ? "core" : "内核")) : (cli.mode || "?")} · TUN ${tunTxt}`;
+    const rtt = !node.rtt ? "" : node.rtt < 0 ? " · " + T("nodeTimeout") : ` · ${node.rtt}ms`;
     const pxRate = px ? ` · ↓${fmtRate(px.down)[0]} ${fmtRate(px.down)[1]}` : "";
     $("#vpnMeta").innerHTML = vpnLane
       ? `${head}${pxRate} · ${knobs}${rtt}`
-      : `未承载流量${pxRate} · ${knobs}${rtt}`;
+      : `${T("headNoStreams")}${pxRate} · ${knobs}${rtt}`;
 
     /* 路径 B：直连 */
     const pd = probes.direct || {};
+    const pc = probes.control || {};
     const directLane = active === "direct" || active === "mixed";
     const lB = $("#laneDirect");
     lB.dataset.active = String(directLane);
     $("#dirLocal").textContent = rd.ip || iface.ip || "—";
     $("#dirNic").textContent = rd.ssid || rd.name || "—";
-    $("#dirExit").textContent = eg.direct_ip || "待测";
+    $("#dirExit").textContent = eg.direct_ip || T("pending");
     const drRate = dr ? `↓${fmtRate(dr.down)[0]} ${fmtRate(dr.down)[1]} · ` : "";
     $("#dirMeta").innerHTML = pd.ts
-      ? (pd.ok ? `<span class="on">${drRate}目标可达 ${fmtMs(pd.ms)}</span>` : `<span class="off">${drRate}目标不通</span> · 对照 ${
-          (probes.control || {}).ok ? fmtMs(probes.control.ms) : "不通"}`)
-      : "探测中";
+      ? (pd.ok ? `<span class="on">${T("tgtOk", drRate, fmtMs(pd.ms))}</span>`
+               : `<span class="off">${T("tgtBad", drRate)}</span>`
+                 + (pc.ok ? T("ctlOk", fmtMs(pc.ms)) : T("ctlBad")))
+      : T("probing");
 
     const subU = cli.sub && cli.sub.updated ? ago(cli.sub.updated) : "";
     $("#modeNote").textContent = cli.name
       ? `${cli.name} · ${cli.core || "?"}${cli.version ? " " + cli.version : ""}`
-        + `${cli.nodes ? " · " + cli.nodes + " 个节点" : ""}`
-        + `${subU ? " · 订阅 " + subU + "更新" : ""}`
-      : "未检测到代理客户端";
-    vd.title = p.reason || "";
+        + (cli.nodes ? T("nodesN", cli.nodes) : "")
+        + (subU ? T("subUpdated", subU) : "")
+      : T("clientNone");
+    vd.title = txt(p.reason);
 
     /* 吞吐：大盘一律是"网卡总量"，因为那才是这台机器真实的流量；
        走没走代理由下面的分账和每一行的标签说清楚 */
@@ -762,53 +1016,56 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     renderMainChart();
     const tn = s.tunnel || {};
     const hcum = host.cum || { down: 0, up: 0 };
-    $("#dnTotalCap").textContent = "本次";
-    $("#upTotalCap").textContent = "本次";
     $("#dnTotal").textContent = fmtBytes(hcum.down);
     $("#upTotal").textContent = fmtBytes(hcum.up);
-    $("#dnTotal").title = `自本面板启动以来这块网卡的累计下行`;
-    $("#upTotal").title = `自本面板启动以来这块网卡的累计上行`;
+    $("#dnTotal").title = T("upTotalTip");
+    $("#upTotal").title = T("upTotalTip");
     const pconns = tn.conns ?? 0;
     $("#connCount").textContent = isX ? "—" : (isHost ? (host.conns ?? 0) : pconns);
     $("#connCount").title = isHost
-      ? "本机已建立的 TCP 连接数（不含回环）"
-      : `经代理 ${pconns} 条 · 本机共 ${host.conns ?? 0} 条（不含回环）`;
+      ? T("footConnHost")
+      : T("footConnProxy", pconns, host.conns ?? 0);
+    // 采样节奏以后端实测的 dt 为准：代理模式 0.5 秒，本机模式枚举重、会退到 1 秒
+    const iv = (s.dt && s.dt > 0) ? s.dt : 1;
+    const ivs = T("sampleIv", iv < 0.95 ? iv.toFixed(1) : iv.toFixed(0));
     $("#siteNote").textContent = isHost
-      ? (hostBytes ? "按进程归并 · 1s 采样 · 管理员权限" : "只数连接 · 不数字节（要管理员权限）")
-      : isX ? "按出口归并 · 1s 采样" : "按域名归并 · 1s 采样";
-    $("#siteTitle").textContent = isHost ? "进程" : "站点";
+      ? (hostBytes ? T("noteHost", ivs) : T("noteNoBytes"))
+      : (isX ? T("noteXray", ivs) : T("noteDomain", ivs));
+    $("#siteTitle").textContent = isHost ? T("procs") : T("sites");
     // 没有连接表就没有逐域名数据：别让"＋ 域名"点了却永远没数
     $("#addSiteBtn").hidden = isX || isHost;
     $("#siteForm").hidden = isX || isHost;
     const rate = (o, k) => { const [v, u] = fmtRate((o || {})[k] || 0); return v + " " + u; };
     $("#tpNote").textContent = isHost
-      ? (host.nic ? `本机网卡总量 · ${host.nic}` : "本机网卡总量")
-        + (pcl ? ` · 经客户端 ${rate(pcl, "down")}` : "")
+      ? (host.nic ? `${T("hostTotal")} · ${host.nic}` : T("hostTotal"))
+        + (pcl ? T("viaClientRate", rate(pcl, "down")) : "")
       : (px && dr)
-        ? `经代理 ${rate(px, "down")} · 不走代理 ${rate(dr, "down")}`
-        : (active === "down" ? "隧道未连接，网卡照数" : "网卡总量");
+        ? `${T("splitProxy", rate(px, "down"))} · ${T("splitDirect", rate(dr, "down"))}`
+        : (active === "down" ? T("tunnelDown") : T("nicTotal"));
     $("#tpNote").title = isHost
       ? (pcl
-        ? `经客户端（回环口 eStats，TCP）：↓${rate(pcl, "down")} ↑${rate(pcl, "up")}\n`
-          + `  这是"应用 → 客户端本地口"的入口字节，其中多少进了隧道、\n`
-          + `  多少被它的规则按直连放出去，客户端不给统计口就分不出来\n`
-          + `网卡总量（含 UDP/QUIC）：↓${rate(t, "down")} ↑${rate(t, "up")}`
+        ? T("tipIngress", rate(pcl, "down"), rate(pcl, "up")) + "\n  " + T("tipIngressNote")
+          + "\n" + T("tipNic", rate(t, "down"), rate(t, "up"))
         : "")
-      : `网卡总量（含 UDP/QUIC）：↓${rate(t, "down")} ↑${rate(t, "up")}\n`
-        + `经代理：↓${rate(px, "down")} ↑${rate(px, "up")}\n`
-        + `不走代理（估算）：↓${rate(dr, "down")} ↑${rate(dr, "up")}`;
+      : T("tipNic", rate(t, "down"), rate(t, "up")) + "\n"
+        + T("tipProxy", rate(px, "down"), rate(px, "up")) + "\n"
+        + T("tipDirect", rate(dr, "down"), rate(dr, "up"));
 
     /* 探测 */
-    const pv = probes.vpn || {}, pc = probes.control || {};
-    setProbe("#pvPill", "#pvRes", pv, "代理→目标");
-    setProbe("#pdPill", "#pdRes", pd, "直连→目标");
-    setProbe("#pcPill", "#pcRes", pc, "直连→baidu");
+    const pv = probes.vpn || {};
+    const pinfo = s.probe || {};
+    $("#pvHost").textContent = pinfo.host || "";
+    $("#pdHost").textContent = pinfo.host || "";
+    $("#pcHost").textContent = pinfo.control || "";
+    setProbe("#pvPill", "#pvRes", pv);
+    setProbe("#pdPill", "#pdRes", pd);
+    setProbe("#pcPill", "#pcRes", pc);
     if (isHost && active !== "mixed") {
       // 没装/没开客户端时 7890 当然连不上，标红只会误导：这一路本来就没启用
       const pill = $("#pvPill");
       pill.className = "pill idle";
-      pill.textContent = "未启用";
-      pill.title = "没有代理客户端，这条通道不存在";
+      pill.textContent = T("off");
+      pill.title = T("probeTipOff");
       $("#pvRes").textContent = "—";
     }
     probeStamp = pv.ts ? hhmmss(pv.ts).slice(0, 5) : "";
@@ -816,8 +1073,10 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const dg = s.diag || {};
     const chip = $("#dgChip");
     chip.dataset.s = dg.state || "idle";
-    chip.textContent = dg.label || "—";
-    chip.title = dg.label ? [dg.why, ...(dg.evidence || [])].filter(Boolean).join("\n") : "";
+    chip.querySelector(".dgt").textContent = txt(dg.label) || "—";
+    chip.title = dg.label
+      ? [txt(dg.why), ...(dg.evidence || []).map(txt)].filter(Boolean).join("\n")
+      : "";
 
     if (pv.ts && pv.ts !== lastProbeTs) {
       lastProbeTs = pv.ts;
@@ -835,27 +1094,28 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     renderSites(isHost ? (hostBytes ? (s.sites || []) : procRows) : (s.sites || []));
     const extras = s.extras || [];
     $("#extras").innerHTML = extras.length
-      ? `<span class="ex-lbl">其他</span>` + extras.map(e =>
-          `<button data-h="${esc(e.label)}" title="点击加入监测：${esc(e.label)}">＋ ${esc(e.label)}`
+      ? `<span class="ex-lbl">${T("other")}</span>` + extras.map(e =>
+          `<button data-h="${esc(e.label)}" title="${T("addTitle", esc(e.label))}">＋ ${esc(e.label)}`
           + ` <b>${fmtRate(e.down)[0]}${fmtRate(e.down)[1]}</b></button>`).join("")
       : "";
 
     /* 页脚 */
-    const nic = iface.kind === "wlan" ? `WLAN ${iface.ssid || ""}` : (iface.name || "网卡");
+    const nic = iface.kind === "wlan" ? `WLAN ${iface.ssid || ""}` : (iface.name || T("kNic"));
     let left = `${nic} · ${iface.ip || "?"}`;
     if (iface.kind === "wlan" && iface.band) {
-      left += ` · ${iface.band} ${iface.channel ? "ch" + iface.channel : ""} · 信号 ${iface.signal || "?"}%`
+      left += ` · ${iface.band} ${iface.channel ? "ch" + iface.channel : ""}`
+        + ` · ${T("sig", (iface.signal || "?") + "%")}`
         + (iface.rx ? ` · ${iface.rx}/${iface.tx} Mbps` : "");
     } else if (iface.gateway) {
-      left += ` · 网关 ${iface.gateway}`;
+      left += ` · ${T("gw", iface.gateway)}`;
     }
-    if (route.dual) left += ` · 直连走 ${rd.name || "?"}${rd.ip ? " " + rd.ip : ""}`;
+    if (route.dual) left += T("directVia", (rd.name || "?") + (rd.ip ? " " + rd.ip : ""));
     $("#footLeft").textContent = left;
     $("#footRight").textContent = isHost
-      ? `本机模式 · ${hostBytes ? (pcl ? "管理员：逐进程速率 + 经客户端字节" : "管理员：逐进程速率")
-        : "普通权限：只数连接"}`
+      ? `${T("hostMode")} · ${hostBytes ? (pcl ? T("adminIngress") : T("adminRates")) : T("userOnly")}`
         + ` · ${hhmmss(s.ts || Date.now() / 1000)}`
-      : `控制器 ${tn.controller || ""} · ${s.ok ? "在线" : "离线"} · ${hhmmss(s.ts || Date.now() / 1000)}`;
+      : T("ctrlLine", tn.controller || "", s.ok ? T("online") : T("offline"),
+          hhmmss(s.ts || Date.now() / 1000));
   }
 
   function shortServer(s) {
@@ -864,12 +1124,12 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     return head.length > 17 ? head.slice(0, 16) + "…" : head;
   }
 
-  function setProbe(pillSel, resSel, p, kind) {
+  function setProbe(pillSel, resSel, p) {
     const pill = $(pillSel), res = $(resSel);
     if (!p || !p.ts) { pill.className = "pill idle"; pill.textContent = "—"; res.textContent = "—"; return; }
     const ok = !!p.ok;
     pill.className = "pill " + (ok ? "ok" : "bad");
-    pill.textContent = ok ? (p.status || 200) : (p.kind ? kindCn(p.kind) : (p.err || "失败"));
+    pill.textContent = ok ? (p.status || 200) : (p.kind ? kindCn(p.kind) : (p.err || T("noRes")));
     pill.title = ok ? "" : (p.detail || "");
     res.textContent = fmtMs(p.ms);
   }
@@ -898,11 +1158,11 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
         body: JSON.stringify({ action, domain })
       });
       const j = await r.json();
-      toast(j.msg || (j.ok ? "已更新" : "失败"));
+      toast(j.msg || (j.ok ? T("toastUpdated") : T("toastFailed")));
       pull();
       return j;
     } catch (e) {
-      toast("没连上本地服务");
+      toast(T("toastOffline"));
     }
   }
 
@@ -927,30 +1187,90 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     if (b) siteAction("add", b.dataset.h);
   };
 
+  /* ── 探测设置（✎） ──
+     改完立刻生效：后端把新的目标/间隔写进全局量，探测线程下一轮就用新的。 */
+  const pvForm = $("#probeForm");
+  function probeFormShow(open) {
+    if (open) {
+      const p = (lastSnap && lastSnap.probe) || {};
+      $("#pvTarget").value = p.target || "";
+      $("#pvControl").value = p.control_url || (p.control ? "https://" + p.control + "/" : "");
+      $("#pvInterval").value = p.interval || 10;
+      $("#pvInterval").min = p.min || 5;
+      $("#pvInterval").max = p.max || 120;
+      $("#pvErr").hidden = true;
+    }
+    pvForm.hidden = !open;
+    $("#probeCfgBtn").setAttribute("aria-expanded", String(open));
+    if (open) $("#pvTarget").focus();
+  }
+  $("#probeCfgBtn").onclick = () => probeFormShow(pvForm.hidden);
+  $("#pvCancel").onclick = () => probeFormShow(false);
+  pvForm.onkeydown = ev => {
+    if (ev.key === "Escape") { probeFormShow(false); }
+  };
+  pvForm.onsubmit = async ev => {
+    ev.preventDefault();
+    const btn = $("#pvSave"), err = $("#pvErr");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target: $("#pvTarget").value.trim(),
+          control: $("#pvControl").value.trim(),
+          interval: Number($("#pvInterval").value),
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        err.textContent = txt(j.msg) || T("toastFailed");
+        err.hidden = false;
+        return;
+      }
+      // 后端已经把新值带回来了：本地也立刻更新，省得下一帧还是旧目标
+      if (j.probe && lastSnap) lastSnap.probe = j.probe;
+      probeFormShow(false);
+      toast(txt(j.msg) || T("toastUpdated"));
+      pull();
+    } catch (e) {
+      err.textContent = T("toastOffline");
+      err.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
   /* ── 时钟 ── */
   let boot = 0;
+  let staleAt = 0;          // 第一次判定成"掉线"的时刻（0 = 正常）
   function tickClock() {
     const d = new Date();
-    $("#clock").textContent = d.toLocaleTimeString("zh-CN", { hour12: false });
+    $("#clock").textContent = d.toLocaleTimeString(LANG === "en" ? "en-GB" : "zh-CN", { hour12: false });
     if (boot) {
       const s = Math.max(0, Math.round((Date.now() - boot) / 1000));
       const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-      $("#uptime").textContent = h ? `已运行 ${h}h${String(m).padStart(2, "0")}m` : `已运行 ${m}m`;
+      $("#uptime").textContent = T("uptime", h ? `${h}h${String(m).padStart(2, "0")}m` : `${m}m`);
     }
-    // 采集器掉线（被 kill / 崩了 / 端口变了）：上一帧的判定不能继续冒充"现在"
+    // 采集器掉线（被 kill / 崩了 / 端口变了）：上一帧的判定不能继续冒充"现在"。
+    // 阈值 6 秒 + 迟滞：正常 0.5~1 秒一帧，机器忙、连接表/探针慢的时候偶尔会憋到两三秒，
+    // 按 3.5 秒判会让提示闪一下又灭；真断了 6 秒内照样报得出来，恢复要拿到新帧才撤。
     const silent = Date.now() - (lastPing || pageStart);
-    const stale = silent > (lastPing ? 3500 : 6000);
+    if (!staleAt && silent > (lastPing ? 6000 : 8000)) staleAt = Date.now();
+    if (staleAt && silent < 1500) staleAt = 0;
+    const stale = staleAt > 0;
     const ls = $("#linkState");
     if (ls) {
       ls.hidden = !stale;
       if (stale) {
         ls.textContent = lastPing
-          ? "采集器未连接 · 最后 " + new Date(lastPing).toLocaleTimeString("zh-CN", { hour12: false })
-          : "采集器未连接";
+          ? T("staleAt", new Date(lastPing).toLocaleTimeString(LANG === "en" ? "en-GB" : "zh-CN", { hour12: false }))
+          : T("stale");
       }
     }
     document.body.classList.toggle("stale", stale);
-    if (stale && !lastPing) $("#verdictText").textContent = "没连上采集器";
+    if (stale && !lastPing) $("#verdictText").textContent = T("lost");
   }
   setInterval(tickClock, 1000);
   tickClock();
@@ -958,10 +1278,14 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
   /* ── 数据流 ── */
   function apply(s) {
     if (!s || !Object.keys(s).length) return;
+    // 帧收到了就算"连着"：渲染出错是面板自己的锅，不该让顶栏报采集器掉线
+    lastPing = Date.now();
+    lastSnap = s;
     if (!boot && s.boot) boot = s.boot * 1000;
-    render(s);
+    try { render(s); } catch (e) { console.warn("render:", e); }
   }
 
+  applyI18n();
   fetch("/api/state").then(r => r.json()).then(apply).catch(() => {});
 
   // 默认走 SSE；?poll=1 退化为 1s 轮询（SSE 被挡、或只想截图时用）

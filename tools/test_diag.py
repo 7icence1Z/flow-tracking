@@ -16,6 +16,11 @@ import providers  # noqa: E402
 import server  # noqa: E402
 
 
+def zh(v):
+    """"后端发的是 L() 双语对象；自检只看中文那版"（顺带挡住"字段类型变了"这种退化）"""
+    return v["zh"] if isinstance(v, dict) else v
+
+
 class Fake(server.Collector):
     """不跑线程、不发包，只提供 _diagnose 需要的那几个字段"""
 
@@ -177,9 +182,9 @@ def main() -> int:
         if got["state"] != want:
             bad_n += 1
         print(f"[{flag}] {i}. {name}")
-        print(f"        → {got['state']}  「{got['label']}」 {got['why']}")
+        print(f"        → {got['state']}  「{zh(got['label'])}」 {zh(got['why'])}")
         if got["evidence"]:
-            print(f"        证据: {' | '.join(got['evidence'][:3])}")
+            print(f"        证据: {' | '.join(zh(x) for x in got['evidence'][:3])}")
         if got["state"] != want:
             print(f"        期望 {want}，实际 {got['state']}")
 
@@ -218,9 +223,9 @@ def main() -> int:
         flag = "ok " if got["state"] == "nopx" else "FAIL"
         bad_n += got["state"] != "nopx"
         print(f"[{flag}] 1. 没客户端 + 没系统代理 → 不判故障")
-        print(f"        → {got['state']}  「{got['label']}」")
+        print(f"        → {got['state']}  「{zh(got['label'])}」")
         if got["evidence"]:
-            print(f"        证据: {' | '.join(got['evidence'][:3])}")
+            print(f"        证据: {' | '.join(zh(x) for x in got['evidence'][:3])}")
 
         # 有系统代理还指着 7890 却说"没客户端"才是真异常，不能被 nopx 吞掉
         c.sysproxy = {"enable": 1, "server": "127.0.0.1:7890"}
@@ -228,7 +233,7 @@ def main() -> int:
         flag = "ok " if got["state"] != "nopx" else "FAIL"
         bad_n += got["state"] == "nopx"
         print(f"[{flag}] 2. 系统代理开着但没客户端 → 照旧报 VPN 问题")
-        print(f"        → {got['state']}  「{got['label']}」")
+        print(f"        → {got['state']}  「{zh(got['label'])}」")
     finally:
         server.DISCO.client = orig
 
@@ -241,16 +246,16 @@ def main() -> int:
                proxy_port={"ok": False, "ms": 1500, "kind": "refused"},
                flow="host", client=("演示客户端", "v2ray"))
         got = c._diagnose(conns=0, flow="host", fwd="127.0.0.1:10809")
-        good = "在转发" in got["label"] and "没在转发" not in got["why"]
+        good = "在转发" in zh(got["label"]) and "没在转发" not in zh(got["why"])
         bad_n += not good
-        print(f"[{'ok ' if good else 'FAIL'}] 1. 有转发证据 → 「{got['label']}」，不说「没在转发」")
-        print(f"        {got['why']}")
+        print(f"[{'ok ' if good else 'FAIL'}] 1. 有转发证据 → 「{zh(got['label'])}」，不说「没在转发」")
+        print(f"        {zh(got['why'])}")
 
         got = c._diagnose(conns=0, flow="host", fwd="")
-        good = "在转发" not in got["label"] and "连不上" not in got["why"]
+        good = "在转发" not in zh(got["label"]) and "连不上" not in zh(got["why"])
         bad_n += not good
-        print(f"[{'ok ' if good else 'FAIL'}] 2. 没证据 → 「{got['label']}」，也不顺口断言「代理口都连不上」")
-        print(f"        {got['why']}")
+        print(f"[{'ok ' if good else 'FAIL'}] 2. 没证据 → 「{zh(got['label'])}」，也不顺口断言「代理口都连不上」")
+        print(f"        {zh(got['why'])}")
 
         # 真开一个监听口，验证判据本身（只用本机 netstat / WMI，不联网）
         import os as _os

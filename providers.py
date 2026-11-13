@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -83,7 +85,157 @@ NIC_HINT = re.compile(r"wintun|wireguard|openvpn|tap-|tap adapter|sing-box|clash
 
 
 # ---------------------------------------------------------------- 基础工具
-def _ps_table() -> dict[int, dict]:
+_K32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TH32CS_SNAPPROCESS = 0x00000002
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+class _FILETIME(ctypes.Structure):
+    _fields_ = [("dwLowDateTime", ctypes.wintypes.DWORD),
+                ("dwHighDateTime", ctypes.wintypes.DWORD)]
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [("dwSize", ctypes.wintypes.DWORD), ("cntUsage", ctypes.wintypes.DWORD),
+                ("th32ProcessID", ctypes.wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", ctypes.wintypes.DWORD),
+                ("cntThreads", ctypes.wintypes.DWORD),
+                ("th32ParentProcessID", ctypes.wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long), ("dwFlags", ctypes.wintypes.DWORD),
+                ("szExeFile", ctypes.wintypes.WCHAR * 260)]
+
+
+_K32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+
+
+def _toolhelp() -> list[tuple[int, int, str]]:
+    """(pid, 父 pid, 映像名)。内核里现成的进程清单，1～3 ms，不需要权限"""
+    snap = _K32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == _INVALID_HANDLE:
+        return []
+    try:
+        pe = _PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(pe)
+        out: list[tuple[int, int, str]] = []
+        if not _K32.Process32FirstW(snap, ctypes.byref(pe)):
+            return []
+        while True:
+            out.append((pe.th32ProcessID, pe.th32ParentProcessID, pe.szExeFile or ""))
+            if not _K32.Process32NextW(snap, ctypes.byref(pe)):
+                break
+        return out
+    finally:
+        _K32.CloseHandle(snap)
+
+
+def _name_table() -> dict[int, dict]:
+    """pid → {name, ppid}。只回答"谁是谁"的时候用这个（本机模式的进程名就靠它）"""
+    return {pid: {"name": name, "ppid": ppid} for pid, ppid, name in _toolhelp()}
+
+
+def _proc_info(pid: int) -> tuple[str, float]:
+    """一次 OpenProcess 拿 路径 + 创建时间。系统进程、权限不够就留空，不猜"""
+    h = _K32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return "", 0.0
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        n = ctypes.wintypes.DWORD(1024)
+        path = buf.value if _K32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else ""
+        c, e, k, u = _FILETIME(), _FILETIME(), _FILETIME(), _FILETIME()
+        created = 0.0
+        if _K32.GetProcessTimes(h, ctypes.byref(c), ctypes.byref(e),
+                                ctypes.byref(k), ctypes.byref(u)):
+            created = float(c.dwLowDateTime | (c.dwHighDateTime << 32))
+        return path, created
+    finally:
+        _K32.CloseHandle(h)
+
+
+# 命令行只有"像代理软件的那几个进程"用得上（抠 -f/--config 定位配置文件），
+# 所以只给候选进程补，并按 (pid, 创建时间) 缓存 —— 客户端不重启就不再起 powershell。
+_CMD_WHY = re.compile(r"proxy|vpn|tunnel", re.I)
+_CMD: dict[int, tuple[float, float, str]] = {}
+_CMD_TTL = 300.0
+
+
+def _ps_cmd(pids: list[int]) -> dict[int, str]:
+    """只问这几个 pid 的命令行。一次 powershell 约 1 秒，所以调用方必须先把范围收窄"""
+    if not pids:
+        return {}
+    cond = " or ".join(f"ProcessId={p}" for p in pids)
+    ps = ("[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+          f"Get-CimInstance Win32_Process -Filter \"{cond}\" | ForEach-Object {{ "
+          "\"$($_.ProcessId)|$($_.CommandLine)\" }")
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, timeout=20,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return {}
+    out = (p.stdout or b"").decode("utf-8", "replace")
+    if "\ufffd" in out:
+        out = (p.stdout or b"").decode("gbk", "replace")
+    got: dict[int, str] = {}
+    for line in out.splitlines():
+        head, _, cmd = line.partition("|")
+        if head.strip().isdigit():
+            got[int(head)] = cmd.strip()
+    return got
+
+
+def _fill_cmd(table: dict[int, dict]) -> None:
+    want: list[int] = []
+    now = time.time()
+    for pid, info in table.items():
+        st = _stem(info.get("name", ""))
+        if not st:
+            continue
+        if not (st in DISPLAY or CORE_HINT.search(st) or _CMD_WHY.search(st)):
+            continue
+        hit = _CMD.get(pid)
+        created = info.get("_created", 0.0)
+        if hit and hit[0] == created and now - hit[1] < _CMD_TTL:
+            info["cmd"] = hit[2]
+        else:
+            want.append(pid)
+    if not want:
+        return
+    got = _ps_cmd(want[:24])
+    for pid in want:
+        info = table.get(pid) or {}
+        cmd = got.get(pid)
+        if cmd is None:
+            continue
+        info["cmd"] = cmd
+        _CMD[pid] = (info.get("_created", 0.0), now, cmd)
+
+
+def _proc_table() -> dict[int, dict]:
+    """pid → {name, path, cmd, ppid}。内核直读 + 候选进程补命令行。
+
+    以前这张表是一次 `Get-CimInstance Win32_Process`：约 1 秒 CPU、上百兆临时进程，
+    为的只是"谁在跑、路径在哪"。名字/父进程/路径内核里都有；只有命令行必须问 WMI，
+    而命令行只用来定位那几个代理内核的配置文件 —— 范围收到个位数，再按进程创建时间缓存。
+    """
+    table: dict[int, dict] = {}
+    for pid, ppid, name in _toolhelp():
+        path, created = _proc_info(pid)
+        table[pid] = {"ppid": ppid, "name": name, "path": path, "cmd": "",
+                      "_created": created}
+    if not table:                                   # 内核这条路不通：退回老办法，别把功能弄丢
+        return _ps_table_wmi()
+    try:
+        _fill_cmd(table)
+    except Exception:
+        pass
+    for info in table.values():
+        info.pop("_created", None)
+    return table
+
+
+def _ps_table_wmi() -> dict[int, dict]:
     """一次 WMI：pid → {name, path, cmd, ppid}。比逐进程查快，也比 PEB 稳妥。"""
     ps = ("[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
           "Get-CimInstance Win32_Process | ForEach-Object { "
@@ -113,7 +265,22 @@ def _ps_table() -> dict[int, dict]:
 
 
 def _listen_map() -> dict[int, int]:
-    """监听端口 → PID。netstat 的列位置跨语言一致，标题行是本地化的，用正则抓末列数字就行。"""
+    """端口 → PID。内核里就有这张表，不必再 spawn netstat（80 ms 一次，还带一个进程）"""
+    try:
+        import hostflow
+        m: dict[int, int] = {}
+        for r in hostflow.tcp_all():
+            if r["pid"]:
+                m.setdefault(r["lport"], r["pid"])
+        if m:
+            return m
+    except Exception:
+        pass
+    return _listen_map_netstat()
+
+
+def _listen_map_netstat() -> dict[int, int]:
+    """netstat 版：内核直读拿不到时兜底。标题行是本地化的，所以只认末列数字"""
     try:
         p = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, timeout=8,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -177,7 +344,59 @@ def _lookup(stem: str) -> str:
     return ""
 
 
+_POOL = threading.local()
+
+
 def _http_json(host_port: str, path: str, secret: str = "", timeout: float = 0.8):
+    """问本地控制器要一份 JSON。走长连接。
+
+    面板 0.5 秒一帧，这条连接一秒要问两三次；而本机建一次 TCP 要 6 ms、
+    整个请求-关闭要 10 ms —— 比"取数据"本身（0.4 ms）贵二十倍。
+    长连接按线程各留一条（互不抢锁），断了重建一次，仍不成才退回 urllib。
+    """
+    host, _, port = host_port.rpartition(":")
+    if not host or not port.isdigit():
+        return _http_json_urllib(host_port, path, secret, timeout)
+    key = (host, int(port))
+    pool = getattr(_POOL, "conns", None)
+    if pool is None:
+        pool = _POOL.conns = {}
+    headers = {"Accept": "application/json", "User-Agent": "flow/1.0"}
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
+    for attempt in (0, 1):
+        conn = pool.get(key)
+        if conn is None:
+            conn = pool[key] = http.client.HTTPConnection(key[0], key[1], timeout=timeout)
+        try:
+            conn.timeout = timeout            # 每次请求可能给不同的超时（0.6～2 秒）
+            if conn.sock is not None:         # 复用的连接要把超时也落到那个 socket 上
+                conn.sock.settimeout(timeout)
+            conn.request("GET", path, headers=headers)
+            r = conn.getresponse()
+            body = r.read()
+            if r.will_close:                  # 对方不想复用：别留一条死连接在池里
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                pool.pop(key, None)
+            if r.status >= 400:
+                # 连接是好的，只是这个路径不对：交给 urllib 抛它原来的错（调用方按它分类）
+                return _http_json_urllib(host_port, path, secret, timeout)
+            return json.loads(body.decode("utf-8", "replace"))
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            pool.pop(key, None)
+            if attempt:
+                break
+    return _http_json_urllib(host_port, path, secret, timeout)
+
+
+def _http_json_urllib(host_port: str, path: str, secret: str = "", timeout: float = 0.8):
     url = f"http://{host_port}{path}"
     req = Request(url, headers={"Accept": "application/json", "User-Agent": "flow/1.0"})
     if secret:
@@ -338,7 +557,7 @@ class Registry:
     # -- 缓存
     def _table(self, force: bool = False) -> dict[int, dict]:
         if force or not self._ps or time.time() - self._ps_at > 30:
-            t = _ps_table()
+            t = _proc_table()
             if t:
                 self._ps, self._ps_at = t, time.time()
         return self._ps

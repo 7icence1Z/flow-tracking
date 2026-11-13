@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes as wt
 import errno
 import os
 import socket
@@ -34,6 +36,20 @@ KINDS = {
     "bind": "绑不上这块网卡",
     "offline": "本机没有网络",
     "unknown": "未知错误",
+}
+
+
+KINDS_EN = {
+    "dns": "DNS resolution failure",
+    "refused": "Connection refused",
+    "reset": "Connection reset",
+    "timeout": "Timed out",
+    "unreach": "Network unreachable",
+    "tls": "TLS handshake / certificate error",
+    "http": "HTTP error",
+    "bind": "Cannot bind this interface",
+    "offline": "No network on this machine",
+    "unknown": "Unknown error",
 }
 
 
@@ -96,8 +112,10 @@ def classify(exc: BaseException) -> str:
     return "unknown"
 
 
-def label(kind: str) -> str:
-    return KINDS.get(kind, KINDS["unknown"])
+def label(kind: str, lang: str = "zh") -> str:
+    """面板显示用的病因名；lang="en" 给英文版（中文是默认）"""
+    src = KINDS_EN if lang == "en" else KINDS
+    return src.get(kind, src["unknown"])
 
 
 def detail(exc: BaseException, limit: int = 90) -> str:
@@ -111,10 +129,70 @@ def detail(exc: BaseException, limit: int = 90) -> str:
 
 
 # ── 1) 网关：链路层到底通不通 ────────────────────────────────
+_ICMP_OK = 0
+_iphlp = None
+
+
+class _IP_OPTION_INFORMATION(ctypes.Structure):
+    _fields_ = [("Ttl", ctypes.c_ubyte), ("Tos", ctypes.c_ubyte), ("Flags", ctypes.c_ubyte),
+                ("OptionsSize", ctypes.c_ubyte), ("OptionsData", ctypes.c_void_p)]
+
+
+class _ICMP_ECHO_REPLY(ctypes.Structure):
+    _fields_ = [("Address", wt.ULONG), ("Status", wt.ULONG), ("RoundTripTime", wt.ULONG),
+                ("DataSize", wt.USHORT), ("Reserved", wt.USHORT), ("Data", ctypes.c_void_p),
+                ("Options", _IP_OPTION_INFORMATION)]
+
+
+def _icmp_modules():
+    """iphlpapi 的 ICMP 句柄。第一次用时才加载，探针本身失败也不影响别的"""
+    global _iphlp
+    if _iphlp is None:
+        lib = ctypes.WinDLL("iphlpapi", use_last_error=True)
+        lib.IcmpCreateFile.restype = ctypes.c_void_p
+        lib.IcmpSendEcho.argtypes = [ctypes.c_void_p, wt.ULONG, ctypes.c_void_p, wt.USHORT,
+                                     ctypes.c_void_p, ctypes.c_void_p, wt.DWORD, wt.DWORD]
+        _iphlp = lib
+    return _iphlp
+
+
 def gateway(gw: str, timeout_ms: int = 900) -> dict:
-    """用 ping.exe 探网关；只看退出码，不解析输出（中英文系统都稳）"""
+    """ping 网关。走 iphlpapi 的 IcmpSendEcho：不起 ping.exe，900 ms 的等待不会再乘上进程启动
+
+    以前是 `ping -n 1 -w 900`：一次约 0.5 秒、每 15 秒两个，等于常驻一个"谁也没在等"的进程。
+    ICMP 回得比进程快得多，结论（通 / 不通 / 不可达）完全一样。
+    """
     if not gw:
         return {"ok": False, "ms": 0, "kind": "unknown", "detail": "没有网关地址"}
+    t0 = time.monotonic()
+    try:
+        lib = _icmp_modules()
+        h = lib.IcmpCreateFile()
+        if not h or h == ctypes.c_void_p(-1).value:
+            raise OSError("IcmpCreateFile 失败")
+        try:
+            payload = ctypes.create_string_buffer(b"flow-tracking" * 2)
+            reply = ctypes.create_string_buffer(ctypes.sizeof(_ICMP_ECHO_REPLY) + 128)
+            dst = int.from_bytes(socket.inet_aton(gw), "little")
+            n = lib.IcmpSendEcho(h, dst, ctypes.byref(payload), 26, None,
+                                 ctypes.byref(reply), len(reply), int(timeout_ms))
+            el = round((time.monotonic() - t0) * 1000)
+            if not n:
+                return {"ok": False, "ms": el, "kind": "unreach",
+                        "detail": f"ping {gw} 没有回应"}
+            got = ctypes.cast(reply, ctypes.POINTER(_ICMP_ECHO_REPLY)).contents
+            if got.Status != _ICMP_OK:                 # 有回包但不是"通了"：不可达 / 被丢弃
+                return {"ok": False, "ms": el, "kind": "unreach",
+                        "detail": f"ping {gw} 返回状态 {got.Status}"}
+            return {"ok": True, "ms": int(got.RoundTripTime) or el, "kind": "", "detail": ""}
+        finally:
+            lib.IcmpCloseHandle(ctypes.c_void_p(h))
+    except Exception:                                          # noqa: BLE001
+        return _gateway_ping(gw, timeout_ms)
+
+
+def _gateway_ping(gw: str, timeout_ms: int = 900) -> dict:
+    """兜底：真起一个 ping.exe。只在 ICMP 接口拿不到时用（一般是系统 API 缺失）"""
     t0 = time.monotonic()
     try:
         p = subprocess.run(

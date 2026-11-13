@@ -8,5 +8,6 @@
     "data.bilibili.com"
   ],
   "probe_interval": 10,
-  "probe_target": "https://chatgpt.com/"
+  "probe_target": "https://chatgpt.com/",
+  "control_target": "https://www.baidu.com/"
 }
