@@ -18,3 +18,6 @@ tools/*
 
 # 演示成片体积大，走 Release 附件，不入库
 docs/demo.mp4
+
+# 发布用封面等渠道素材，不入库
+cover/
