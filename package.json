@@ -14,8 +14,12 @@
     "bandwidth",
     "monitor",
     "windows",
-    "network"
+    "network",
+    "proxy",
+    "egress",
+    "network-monitor"
   ],
+  "author": "7icence1Z",
   "homepage": "https://github.com/7icence1Z/flow-tracking",
   "repository": {
     "type": "git",
@@ -24,7 +28,7 @@
   "bugs": {
     "url": "https://github.com/7icence1Z/flow-tracking/issues"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "os": [
     "win32"
   ],
@@ -44,7 +48,9 @@
     "diag.py",
     "start.ps1",
     "start.cmd",
+    "LICENSE",
     "README.md",
+    "README.en.md",
     "CHANGELOG.md"
   ]
 }

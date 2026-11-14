@@ -2,6 +2,14 @@
 
 版本号按语义化来：`主.次.修订`。破坏性改动、新增能力、修复分开写。
 
+## 未发布
+
+**文档**，不改运行时行为。
+
+- 补 MIT 许可（`LICENSE`），`package.json` 补 `license` / `author` / `files`。
+- 新增英文 README（`README.en.md`，英式拼写）与实现说明（`docs/IMPLEMENTATION.md`：资源占用、数据来源、自检）。
+- README 顶部换成 13 秒演示（`docs/demo.gif`，1024 px）；25 秒 2K 成片走 Release 附件，不入库。
+
 ## v0.1.4 — 2026-11-13
 
 **已发布**：<https://github.com/7icence1Z/flow-tracking/releases/tag/v0.1.4>
