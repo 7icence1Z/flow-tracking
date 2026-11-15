@@ -13,17 +13,19 @@
 </p>
 
 <p align="center">
-  <a href="README.md">中文</a> · <a href="CHANGELOG.md">Changelog</a>
+  <a href="README.md">中文</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="https://github.com/7icence1Z/flow-tracking/discussions">Discussions</a>
 </p>
 
 <p align="center"><img src="docs/demo.gif" width="780" alt="FLOW panel demo"></p>
-<p align="center"><sub>A 13-second loop, rendered from the real interface; all figures are fictitious and reproducible with <code>tools/mock_state.py</code>.<br><a href="https://github.com/7icence1Z/flow-tracking/releases/latest">Full 2K version (25 seconds, including host mode and per-process rates)</a></sub></p>
+<p align="center"><sub>A 24-second walkthrough: intro → panel (tunnel and direct paths) → closing install card. Rendered from the real interface; all figures are fictitious and reproducible with <code>tools/mock_state.py</code>.<br>Music: Disfigure — <a href="https://ncs.io/blank">Blank</a> (NoCopyrightSounds, free to use with credit)<br><a href="https://github.com/7icence1Z/flow-tracking/releases/latest">Full 2K version (24 seconds, including host mode and per-process rates)</a></sub></p>
 
 ## Overview
 
 This is a small, locally run monitoring panel that answers one question: **is the traffic right now going direct or through a tunnel, which adapter does it use, and which public IP does it leave from?**
 
 Three data lines are tracked at once — adapter total, via proxy, and not via proxy — and sites are coloured by their actual egress. When no client is running, accounting continues from the adapter and process tables; when a client exposes no statistics endpoint, samples are taken from its local proxy port. Windows 10/11 only, Python standard library only, no third-party dependencies, no telemetry. Current version **v0.1.4** (2026-11-13); see the [changelog](CHANGELOG.md).
+
+**How it differs** — Task Manager reports adapter totals, a proxy client's own panel reports only the traffic it carried, and `netstat` gives a list of connections. This tool aligns all three on one timeline: in any given second, which adapter, tunnel or not, and which public IP — the colour of every point on the curve is that second's verdict.
 
 ## Install
 

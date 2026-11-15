@@ -8,7 +8,11 @@
 
 - 补 MIT 许可（`LICENSE`），`package.json` 补 `license` / `author` / `files`。
 - 新增英文 README（`README.en.md`，英式拼写）与实现说明（`docs/IMPLEMENTATION.md`：资源占用、数据来源、自检）。
-- README 顶部换成 13 秒演示（`docs/demo.gif`，1024 px）；25 秒 2K 成片走 Release 附件，不入库。
+- 成片补开场简介页（与片尾同版式的三张说明卡）与片尾安装卡；配乐改用 Disfigure《Blank》
+  （NoCopyrightSounds，免费授权，README 与视频简介署名）。
+- README 顶部演示换成含开场页的 24 秒版本（`docs/demo.gif`，960 px，8 fps）；
+  中英两版 2K 成片仍走 Release 附件，`docs/demo*.mp4` 一律不入库。
+- README 补一段与任务管理器、代理客户端面板、`netstat` 的分工说明，导航加 Discussions 入口。
 
 ## v0.1.4 — 2026-11-13
 

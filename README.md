@@ -13,15 +13,17 @@
 </p>
 
 <p align="center">
-  <a href="README.en.md">English</a> · <a href="CHANGELOG.md">变更记录</a>
+  <a href="README.en.md">English</a> · <a href="CHANGELOG.md">变更记录</a> · <a href="https://github.com/7icence1Z/flow-tracking/discussions">讨论</a>
 </p>
 
 <p align="center"><img src="docs/demo.gif" width="780" alt="FLOW 面板演示"></p>
-<p align="center"><sub>13 秒循环，真实界面渲染；图中的数据均为虚构值，由 <code>tools/mock_state.py</code> 生成，可复现。<br><a href="https://github.com/7icence1Z/flow-tracking/releases/latest">2K 完整版（25 秒，含本机模式与逐进程速率）</a></sub></p>
+<p align="center"><sub>24 秒全程：开场简介 → 面板（隧道与直连两条链）→ 片尾安装说明。真实界面渲染，图中数据均为虚构值，由 <code>tools/mock_state.py</code> 生成，可复现。<br>配乐：Disfigure — <a href="https://ncs.io/blank">Blank</a>（NoCopyrightSounds，免费使用，署名即授权）<br><a href="https://github.com/7icence1Z/flow-tracking/releases/latest">2K 完整版（24 秒，含本机模式与逐进程速率）</a></sub></p>
 
 ## 概述
 
 本程序是仅在本机运行的小型监控面板，用于回答一个问题：**当前时刻的流量是直连还是经隧道转发、经由哪块网卡、从哪个公网 IP 出口。**它同时统计三条数据线 —— 网卡总量、经代理、不经代理 —— 并按实际出口为站点着色；未启用客户端时依据网卡与进程继续统计，客户端未提供统计接口时从其本地代理端口取样。适用于 Windows 10/11，仅使用 Python 标准库，无第三方依赖，无遥测。当前版本 **v0.1.4**（2026-11-13），变更详见 [CHANGELOG](CHANGELOG.md)。
+
+**和它们的分工**：任务管理器只给网卡总量，代理客户端的面板只给「走了代理的那部分」，`netstat` 只给一张连接列表。这里把三条线对齐到同一条时间轴上 —— 同一秒里走的是哪块网卡、经不经隧道、从哪个公网 IP 出去，曲线上每一点的颜色就是那一秒的判定。
 
 ## 安装
 
