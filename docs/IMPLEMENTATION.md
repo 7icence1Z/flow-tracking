@@ -36,6 +36,7 @@
 | 脚本 | 内容 |
 |---|---|
 | `tools/test_diag.py` | 诊断判定 41 项，覆盖各层失败与灰色情形 |
+| `tools/test_node.py` | 节点名与归属 75 项：占位名、地域识别、Clash / sing-box / v2rayN / Xray 配置解析（含行内写法）、判定顺序、节点视图、出口反查缓存与轮转 |
 | `tools/test_xray.py` | v2rayN 适配：配置解析、节点表、假统计接口 |
 | `tools/test_estats.py` | 普通权限下 eStats 返回 5 的降级路径 |
 | `tools/check_js.py` | 面板 JS 语法检查 |

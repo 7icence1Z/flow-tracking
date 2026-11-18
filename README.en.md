@@ -23,7 +23,7 @@
 
 This is a small, locally run monitoring panel that answers one question: **is the traffic right now going direct or through a tunnel, which adapter does it use, and which public IP does it leave from?**
 
-Three data lines are tracked at once — adapter total, via proxy, and not via proxy — and sites are coloured by their actual egress. When no client is running, accounting continues from the adapter and process tables; when a client exposes no statistics endpoint, samples are taken from its local proxy port. Windows 10/11 only, Python standard library only, no third-party dependencies, no telemetry. Current version **v0.1.4** (2026-11-13); see the [changelog](CHANGELOG.md).
+Three data lines are tracked at once — adapter total, via proxy, and not via proxy — and sites are coloured by their actual egress. When no client is running, accounting continues from the adapter and process tables; when a client exposes no statistics endpoint, samples are taken from its local proxy port. Windows 10/11 only, Python standard library only, no third-party dependencies, no telemetry. Current version **v0.1.5** (2026-11-18); see the [changelog](CHANGELOG.md).
 
 **How it differs** — Task Manager reports adapter totals, a proxy client's own panel reports only the traffic it carried, and `netstat` gives a list of connections. This tool aligns all three on one timeline: in any given second, which adapter, tunnel or not, and which public IP — the colour of every point on the curve is that second's verdict.
 
@@ -89,15 +89,17 @@ If eStats returns 5 under standard rights, the panel falls back to connection-on
 
 ## Supported clients
 
-Clients are discovered automatically, with nothing to configure: port ownership (`GetExtendedTcpTable`) → `GET /version` to identify the Clash API → configuration located from the kernel command line → node table parsed, each step validated for liveness; a client's identity is discarded when it exits.
+Clients are discovered automatically, with nothing to configure: port ownership (`GetExtendedTcpTable`) → `GET /version` to identify the Clash API → configuration located from the kernel command line → node table parsed (both block and inline `{…}` forms), each step validated for liveness; a client's identity is discarded when it exits.
 
 | Client | Verdict | Node name | Per-connection | Bytes |
 |---|---|---|---|---|
 | Clash Verge / Mihomo Party / FlClash / mihomo / provider builds | ✅ | ✅ | ✅ | ✅ per domain |
 | sing-box (with `clash_api`) | ✅ | ✅ | ✅ | ✅ per domain |
 | v2rayN (Xray core) | ✅ | ✅ from `guiNDB.db` | ❌ | ✅ per outbound |
-| Other Xray shells / WireGuard / OpenVPN / Tailscale | ✅ | address when unnamed | ❌ | adapter + egress |
+| Other Xray shells / WireGuard / OpenVPN / Tailscale | ✅ | region when unnamed | ❌ | adapter + egress |
 | No client running | ✅ direct | — | ✅ per process | adapter total |
+
+Node names are shown as the client gives them; when a name says nothing (`proxy`, `auto-select`, a lone flag) the panel uses region and protocol instead, such as `Japan · VLESS`, and the tooltip keeps the raw name, the address and the evidence used. A name only ever comes from evidence — connection table → egress IP → default group in the configuration → global mode → group selection → the only node — and when none of those settles it, only the egress region is shown rather than guessing from the first node in the configuration or the previous one; a note is added when several groups pick different nodes.
 
 Visibility is labelled honestly as **connection-level** (per domain), **outbound-level** (v2rayN read from `/debug/vars` on its `metrics.listen`, giving only "via proxy" and "direct" rows), **adapter only** or **host-level**; where per-domain data is unavailable the panel says so instead of filling the gap with totals.
 
@@ -163,7 +165,7 @@ start.ps1, start.cmd  launcher / double-click entry point
 package.json, bin/flow.js  npm wrapper (flow only forwards arguments to start.ps1)
 config.json           configuration
 docs/                 four diagrams (Clash / v2rayN / host / host+elevated)
-tools/                peek.py snapshot viewer · mock_state.py demo data · test_* self-checks · check_js.py JS syntax check
+tools/                peek.py snapshot viewer · mock_state.py demo data · test_* self-checks (including test_node.py, 75 checks) · check_js.py JS syntax check
 ```
 
 ## FAQ

@@ -27,12 +27,18 @@ import socket
 import subprocess
 import threading
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import ProxyHandler, Request, build_opener
 from urllib.parse import urlsplit
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+
+# 节点名/服务器地址 → 地域、占位名判定：都放在 providers 里，
+# 面板、服务端、将来别的入口共用同一套规则，别各写一份。
+def _region_hint(host: str) -> str:
+    """从节点服务器域名里猜地域：jp-xxx-aa-10077.node-yingyun.site → JP"""
+    return providers.region_from_host(host)
 
 
 def _load_config() -> dict:
@@ -416,48 +422,30 @@ class NetInfo:
 
     @staticmethod
     def _parse_proxies(text: str) -> dict:
-        """把配置里的 proxies 段解析成 name → {type, server, port}。
-        只认与 name 同级的键，ws-opts / reality-opts 里的同名键不会串进来。"""
-        out: dict = {}
-        if "proxies:" not in text:
-            return out
-        seg = text.split("proxies:", 1)[1]
-        cur = None
-        base = -1
-        for raw in seg.splitlines():
-            line = raw.rstrip()
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            indent = len(line) - len(line.lstrip())
-            if s.startswith("- "):
-                cur = None
-                body = s[2:]
-                if not body.startswith("name:"):
-                    continue
-                base = indent + 2
-                cur = {"name": body.split("name:", 1)[1].strip().strip("\"'"),
-                       "server": "", "port": 0, "type": ""}
-                out[cur["name"]] = cur
-                continue
-            if cur is None or indent != base:
-                continue
-            k, sep, v = s.partition(":")
-            if not sep or k.strip() not in ("name", "type", "server", "port"):
-                continue
-            v = v.strip().strip("\"'")
-            k = k.strip()
-            if k == "port":
-                cur["port"] = int(re.sub(r"\D", "", v) or 0)
-            elif k == "type":
-                cur["type"] = v.upper()
-            else:
-                cur[k] = v
-        return out
+        """配置里的节点表：YAML 走 clash 解析，JSON 走 outbound 解析（两者都别把组算进来）"""
+        return providers.parse_clash_proxies(text) or providers.parse_json_outbounds(text)
 
     def _node(self):
         c = self.client
+        # 先问控制器：Clash 系（含 proxy-providers 订阅）的节点表只有它最全
+        groups: dict = {}
+        if c and c.api:
+            try:
+                groups = (api("/proxies") or {}).get("proxies") or {}
+            except Exception:
+                groups = {}
         proxies = dict(c.proxies) if (c and c.proxies) else {}
+        if not proxies and groups:
+            # 订阅走 proxy-providers 时配置里没有 proxies 段：拿控制器里的真节点兜底
+            # （这类客户端以前会整块空着，明明它知道叫什么）
+            proxies = {}
+            for k, v in groups.items():
+                if not isinstance(v, dict):
+                    continue
+                if providers.is_pseudo_type(v.get("type")):
+                    continue
+                proxies[k] = {"name": k, "server": v.get("server", "") or "",
+                              "port": v.get("port") or 0, "type": v.get("type", "")}
         if not proxies:
             conf = self.mihomo.get("config") or ""
             if conf and os.path.exists(conf):
@@ -467,52 +455,87 @@ class NetInfo:
                 self.node = {}          # 既没有控制器也没有配置：宁可空着也不猜
             return
         self.proxies = proxies
-        # 真正在用的节点：先问控制器选中的是谁（global 模式下 GLOBAL 组的 now 就是它），
-        # 再退到连接链里出现次数最多的那个配置名
-        want, counts = "", {}
+        # 在用的节点按证据强弱逐级判定；判不出来就只报"出口在哪"，绝不拿配置里的
+        # 第一个节点或上一次的旧节点顶上 —— 那正是"选的是美国却显示新加坡"的来源
+        want, src, counts, group_names = "", "", {}, []
+        if groups:
+            # 节点数只有控制器最清楚（含 provider 订阅的节点）
+            n_api = providers.count_nodes(groups)
+            if c is not None and n_api > (getattr(c, "nodes", 0) or 0):
+                c.nodes = n_api
+            group_names = [k for k, v in groups.items()
+                           if isinstance(v, dict) and
+                           str(v.get("type") or "").lower() in
+                           ("selector", "urltest", "fallback", "loadbalance", "relay")]
+        # ① 连接链第一项 = 真正在走的那条（后面是策略组名）；有流量时它最可信
         try:
-            groups = (api("/proxies") or {}).get("proxies") or {}
-            g = groups.get("GLOBAL") or {}
-            if (self.mihomo.get("mode") or "").lower() == "global" and g.get("now") in proxies:
-                want = g["now"]
-            else:
-                for gg in groups.values():
-                    if gg.get("type") in ("Selector", "URLTest", "Fallback") and gg.get("now") in proxies:
-                        counts[gg["now"]] = counts.get(gg["now"], 0) + 1
+            for conn in api("/connections").get("connections") or []:
+                ch = [x for x in (conn.get("chains") or []) if x in proxies]
+                if ch:
+                    counts[ch[0]] = counts.get(ch[0], 0) + 1
+            if counts:
+                want, src = max(counts, key=counts.get), "conn"
         except Exception:
             pass
+        # ② 出口 IP 正好等于某个节点地址（直连出口的强证据）
         if not want and getattr(self, "vpn_exit_ip", ""):
             hit = DISCO.match_exit(self.vpn_exit_ip)
-            if hit:
-                want = hit["name"]
+            if hit and hit.get("name") in proxies:
+                want, src = hit["name"], "exit"
+        # ③ 默认出口：配置里 MATCH 指向的那个组，控制器此刻选中了谁
         if not want:
-            try:
-                for c in api("/connections").get("connections") or []:
-                    for x in c.get("chains") or []:
-                        if x in proxies:
-                            counts[x] = counts.get(x, 0) + 1
-                if counts:
-                    want = max(counts, key=counts.get)
-            except Exception:
-                pass
+            dflt = providers.default_group(c) if c else ""
+            if dflt:
+                now = (groups.get(dflt) or {}).get("now")
+                if now in proxies:
+                    want, src = now, "default"
+                elif dflt in proxies:
+                    want, src = dflt, "default"
+        # ④ global 模式：GLOBAL 选中谁就是谁
+        if not want:
+            g = groups.get("GLOBAL") or {}
+            if str(self.mihomo.get("mode") or "").lower() == "global" and g.get("now") in proxies:
+                want, src = g["now"], "global"
+        # ⑤ 各组 now 投票 —— 最弱的证据，组一多就容易选到不是当前这条
+        if not want and group_names:
+            votes = {}
+            for name in group_names:
+                now = (groups.get(name) or {}).get("now")
+                if now in proxies:
+                    votes[now] = votes.get(now, 0) + 1
+            if votes:
+                want, src = max(votes, key=votes.get), "group"
+        # ⑥ 配置里只有一个节点：就是它
+        if not want and len(proxies) == 1:
+            want, src = next(iter(proxies)), "only"
         prev = dict(self.node)
         p = proxies.get(want) or {}
         if not p:
-            if prev.get("server"):
-                # 没有依据时沿用上次认出的节点，别随手抓配置里的第一条（可能是占位项）
+            ex = getattr(self, "vpn_exit_ip", "") or ""
+            same_client = (not prev.get("pid") or not self.mihomo.get("pid")
+                           or prev.get("pid") == self.mihomo.get("pid"))
+            if (prev.get("name") and same_client
+                    and (not ex or ex == prev.get("exit"))):
+                # 出口没变：沿用上次认出的节点，免得每轮跳动
                 self.node = {**prev, "pid": self.mihomo.get("pid", 0)}
                 return
-            for v in proxies.values():
-                srv = v.get("server") or ""
-                if srv and not re.fullmatch(r"\d+", srv) and "." in srv:
-                    p, want = v, v["name"]
-                    break
+            # 出口变了又判不出是谁：置空，面板退回只显示出口地域，绝不编一个名字
+            self.node = {}
+            return
+        name = p.get("name") or want
         self.node = {
-            "name": want or p.get("name", ""),
+            "name": name,
             "server": p.get("server", ""),
             "port": p.get("port", 0),
             "type": p.get("type", ""),
             "pid": self.mihomo.get("pid", 0),
+            "exit": getattr(self, "vpn_exit_ip", "") or "",
+            "source": src,
+            # 名字是占位词、或者就是某个策略组名（"PROXY 组选中 PROXY"）时换个叫法
+            "generic": providers.is_placeholder(name, group_names),
+            # 多个组各自选中的节点不一样：名字只代表"其中一条"，面板据此说明
+            "multi": len({(groups.get(k) or {}).get("now") for k in group_names
+                          if (groups.get(k) or {}).get("now") in proxies}) > 1,
         }
         if self.node.get("server") != prev.get("server"):
             self.node["changed_at"] = time.time()
@@ -627,8 +650,9 @@ class Collector:
         self.hist_total: list[list[int]] = []
         self.hist_sites: dict[str, list[list[int]]] = {}
         self.cum: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
-        self.egress = {"vpn_ip": "", "vpn_geo": "", "vpn_ts": 0, "vpn_err": "",
-                       "direct_ip": "", "direct_geo": "", "direct_ts": 0, "direct_err": ""}
+        self.egress = {"vpn_ip": "", "vpn_geo": "", "vpn_cc": "", "vpn_ts": 0, "vpn_err": "",
+                       "direct_ip": "", "direct_geo": "", "direct_cc": "",
+                       "direct_ts": 0, "direct_err": ""}
         self.probes: dict[str, dict] = {}
         self.link: dict = {}          # 诊断用的原始证据：网关、DNS、各网卡到目标的握手
         self.diag: dict = {}          # 由证据算出来的结论：怀疑谁
@@ -1234,7 +1258,7 @@ class Collector:
             "client": DISCO.client.pack(),
             "iface": self.net.iface,
             "route": self.net.route,
-            "node": self.net.node,
+            "node": self._node_view(),
             "mihomo": self.net.mihomo,
             "egress": self.egress,
             "probes": probes,
@@ -1257,26 +1281,41 @@ class Collector:
             "total": {"down": round(total[0]), "up": round(total[1])},
         })
 
+    def _node_view(self) -> dict:
+        """发给面板的节点视图：补上地域提示，名字是占位词时面板会改用"地域 · 协议" """
+        n = dict(self.net.node)
+        if not n.get("name") and not n.get("server") and self.egress.get("vpn_ip"):
+            n = {"generic": True}          # 认不出是谁，但知道出口在哪
+        if n:
+            n["generic"] = bool(n.get("generic"))
+            n["cc"] = self.egress.get("vpn_cc", "")
+            n["geo"] = self.egress.get("vpn_geo", "")
+            n["hint"] = providers.node_region(n.get("name", ""), n.get("server", ""))
+        return n
+
     # -- 探测
     @staticmethod
     def _parse_ipapi(body: str):
-        """ip-api 的 line 格式，行的顺序不保证，按内容判定哪个是 IP"""
-        ip = geo = ""
+        """ip-api 的 line 格式，行的顺序不保证，按内容判 IP / 国家名 / 两位国家码"""
+        ip = geo = cc = ""
         for raw in body.splitlines():
             t = raw.strip()
             if not t:
                 continue
             if re.fullmatch(r"[0-9a-fA-F:.]+", t) and ("." in t or ":" in t):
                 ip = ip or t
+            elif re.fullmatch(r"[A-Z]{2}", t) and not cc:
+                cc = t
             elif not geo:
                 geo = t
-        return ip, geo
+        return ip, geo, cc
 
     def probe_egress(self):
         now = time.time()
         if now - self.egress["vpn_ts"] > 120:
-            r = http_get("http://ip-api.com/line/?fields=query,country", self.proxy, timeout=8, read=256)
-            ip, geo = self._parse_ipapi(r.get("body", "")) if r["ok"] else ("", "")
+            r = http_get("http://ip-api.com/line/?fields=query,country,countryCode",
+                         self.proxy, timeout=8, read=256)
+            ip, geo, cc = self._parse_ipapi(r.get("body", "")) if r["ok"] else ("", "", "")
             if not ip:
                 r2 = http_get("https://api.ipify.org", self.proxy, timeout=8, read=64)
                 if r2["ok"]:
@@ -1284,13 +1323,16 @@ class Collector:
             self.egress["vpn_ip"] = ip
             self.net.vpn_exit_ip = ip
             self.egress["vpn_geo"] = geo
+            self.egress["vpn_cc"] = cc
             self.egress["vpn_err"] = "" if ip else (r.get("err") or "失败")
             self.egress["vpn_ts"] = now
         if now - self.egress["direct_ts"] > 300:
-            r = http_get("http://ip-api.com/line/?fields=query,country", None, timeout=6, read=256)
-            ip, geo = self._parse_ipapi(r.get("body", "")) if r["ok"] else ("", "")
+            r = http_get("http://ip-api.com/line/?fields=query,country,countryCode",
+                         None, timeout=6, read=256)
+            ip, geo, cc = self._parse_ipapi(r.get("body", "")) if r["ok"] else ("", "", "")
             self.egress["direct_ip"] = ip
             self.egress["direct_geo"] = geo
+            self.egress["direct_cc"] = cc
             self.egress["direct_err"] = "" if ip else (r.get("err") or "失败")
             self.egress["direct_ts"] = now
 

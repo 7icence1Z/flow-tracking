@@ -410,9 +410,18 @@ def parse_clash_proxies(text: str) -> dict:
     """配置里 proxies: 段 → name → {name,server,port,type}。
     只认与 name 同级的键，ws-opts / reality-opts 里的同名键不会串进来。"""
     out: dict = {}
-    if "\nproxies:" not in "\n" + text:
+    m = re.search(r"^proxies:[ \t]*\r?\n", text or "", re.M)
+    if not m:                                  # 文件开头就是 proxies: 也要认（以前会 IndexError）
         return out
-    seg = text.split("\nproxies:", 1)[1]
+    seg = text[m.end():]
+    # 顶格的 `proxy-groups:` / `rules:` 等是下一个段落：不在这里收尾，
+    # 策略组（- name: PROXY 这类）就会被当成节点，连"共 N 个节点"都会算多
+    keep = []
+    for raw in seg.splitlines():
+        if raw and not raw[0].isspace() and ":" in raw and not raw.lstrip().startswith("#"):
+            break
+        keep.append(raw)
+    seg = "\n".join(keep)
     cur = None
     base = -1
     for raw in seg.splitlines():
@@ -421,15 +430,37 @@ def parse_clash_proxies(text: str) -> dict:
         if not s or s.startswith("#"):
             continue
         indent = len(line) - len(line.lstrip())
-        if s.startswith("- "):
+        if s.startswith("-"):
+            # 两种写法都要认：块状（- name: x 换行接 server:）和行内（- {name: x, server: y}）
+            head = s[1:].lstrip()
+            base = indent + 1 + (len(s) - 1 - len(head))   # 键的起始列（- 后面可能不止一个空格）
             cur = None
-            body = s[2:]
-            if not body.startswith("name:"):
+            if head.startswith("{") and head.endswith("}"):
+                cur = {"name": "", "server": "", "port": 0, "type": ""}
+                for kv in head.strip("{}").split(","):
+                    k, sep, v = kv.partition(":")
+                    if not sep:
+                        continue
+                    k = k.strip().strip("\"'").lower()
+                    v = v.strip().strip("\"'")
+                    if k in ("name", "server"):
+                        cur[k] = v
+                    elif k == "type":
+                        cur["type"] = v.upper()
+                    elif k == "port":
+                        cur["port"] = int(re.sub(r"\D", "", v) or 0)
+                if not cur["name"]:
+                    cur = None
+                else:
+                    out[cur["name"]] = cur
                 continue
-            base = indent + 2
-            cur = {"name": body.split("name:", 1)[1].strip().strip("\"'"),
-                   "server": "", "port": 0, "type": ""}
-            out[cur["name"]] = cur
+            if not head.startswith("name:"):
+                continue
+            name = head.split("name:", 1)[1].strip().strip("\"'")
+            if not name:
+                continue
+            cur = {"name": name, "server": "", "port": 0, "type": ""}
+            out[name] = cur
             continue
         if cur is None or indent != base:
             continue
@@ -465,6 +496,282 @@ def parse_json_outbounds(text: str) -> dict:
                      "port": int(o.get("server_port") or o.get("port") or 0),
                      "type": (o.get("type") or "").upper()}
     return out
+
+
+# ---------------------------------------------------------------- 节点命名
+# 有的客户端不把"你选的那个节点"的名字交出来：
+#   · 鹰云这类单节点配置，节点名就是字面的 proxy；
+#   · v2rayN 生成的 config.json 里 outbound tag 也叫 proxy，真名在 guiNDB.db 的 remarks 里；
+#   · sing-box 生成器常写 proxy / 自动选择 / 🚀 节点选择 这类名字。
+# 这些名字照抄等于没说。于是统一判一遍：占位名 → 用"地域 + 协议"代替。
+GROUP_TYPES = {
+    "selector", "urltest", "fallback", "loadbalance", "load-balance", "relay",
+    "direct", "reject", "block", "dns", "compatible", "pass", "hosts",
+    "freedom", "blackhole", "proxy", "group",
+    # mihomo 还会塞两个"不是节点"的内置项，名字随语言变，按 type 认最稳
+    "rejectdrop", "reject-drop", "passrule", "pass-rule", "rematch",
+}
+
+PLACEHOLDER_NAMES = {
+    "proxy", "proxies", "proxynode", "node", "nodes", "server", "outbound", "outbounds",
+    "default", "select", "selected", "auto", "automatic", "global", "direct", "reject",
+    "block", "dns", "group", "groups", "chain", "tunnel", "vpn", "main", "local",
+    "socks", "http", "mixed", "ss", "ssr", "vmess", "vless", "trojan", "hysteria",
+    "hysteria2", "hy2", "tuic", "wireguard", "wg", "relay", "config", "test", "remote",
+    "节点", "代理", "代理节点", "自动", "自动选择", "手动", "手动切换", "直连", "全局",
+    "未知", "默认", "测试", "本机", "分流", "节点选择", "代理模式",
+}
+
+# 两位国家/地区码（够用即可：不在表里的三字词/域名里仍能靠 REGION_WORDS 兜住）
+REGION_CODES = {
+    "jp", "us", "hk", "sg", "tw", "kr", "de", "nl", "gb", "uk", "fr", "ca", "au", "ru",
+    "in", "tr", "br", "my", "th", "vn", "id", "ph", "ae", "ch", "se", "fi", "no", "pl",
+    "it", "es", "ie", "at", "be", "dk", "cz", "ua", "kz", "mo", "nz", "za", "sa", "il",
+    "ir", "ar", "cl", "mx", "co", "pe", "ve", "cn", "pt", "ro", "bg", "gr", "hu", "lt",
+    "lv", "ee", "hr", "rs", "by", "am", "ge", "az", "mn", "np", "pk", "lk", "bd", "kh",
+    "la", "mm", "bn", "jo", "kw", "qa", "om", "bh", "eg", "ma", "ng", "ke", "tz", "gh",
+    "eu", "un",
+}
+
+# 地名 → 国家/地区码。英文优先按词边界匹配，中文直接子串匹配（"香港01" 也要认出来）
+REGION_WORDS = [
+    ("japan", "JP"), ("日本", "JP"), ("东京", "JP"), ("東京", "JP"), ("tokyo", "JP"),
+    ("大阪", "JP"), ("osaka", "JP"), ("nrt", "JP"), ("hnd", "JP"), ("kix", "JP"),
+    ("australia", "AU"), ("germany", "DE"), ("deutschland", "DE"), ("netherlands", "NL"),
+    ("holland", "NL"), ("england", "GB"), ("britain", "GB"), ("france", "FR"),
+    ("canada", "CA"), ("india", "IN"), ("turkey", "TR"), ("brazil", "BR"),
+    ("malaysia", "MY"), ("thailand", "TH"), ("vietnam", "VN"), ("indonesia", "ID"),
+    ("philippines", "PH"), ("switzerland", "CH"), ("sweden", "SE"), ("finland", "FI"),
+    ("norway", "NO"), ("poland", "PL"), ("italy", "IT"), ("spain", "ES"), ("ireland", "IE"),
+    ("austria", "AT"), ("belgium", "BE"), ("denmark", "DK"), ("czechia", "CZ"),
+    ("ukraine", "UA"), ("russia", "RU"), ("kazakhstan", "KZ"), ("mexico", "MX"),
+    ("israel", "IL"), ("iran", "IR"), ("argentina", "AR"), ("chile", "CL"),
+    ("newzealand", "NZ"), ("southafrica", "ZA"), ("korea", "KR"), ("taiwan", "TW"),
+    ("singapore", "SG"), ("hongkong", "HK"), ("japan", "JP"), ("china", "CN"),
+    ("unitedstates", "US"), ("america", "US"), ("美国", "US"), ("美國", "US"),
+    ("洛杉矶", "US"), ("losangeles", "US"), ("圣何塞", "US"), ("sanjose", "US"),
+    ("西雅图", "US"), ("seattle", "US"), ("纽约", "US"), ("newyork", "US"),
+    ("达拉斯", "US"), ("dallas", "US"), ("凤凰城", "US"), ("硅谷", "US"), ("芝加哥", "US"),
+    ("lax", "US"), ("sfo", "US"), ("sjc", "US"), ("jfk", "US"), ("sea", "US"),
+    ("香港", "HK"), ("hongkong", "HK"), ("hkg", "HK"),
+    ("台湾", "TW"), ("台灣", "TW"), ("台北", "TW"), ("taipei", "TW"), ("tpe", "TW"),
+    ("新加坡", "SG"), ("singapore", "SG"), ("狮城", "SG"), ("sin", "SG"),
+    ("韩国", "KR"), ("韓國", "KR"), ("首尔", "KR"), ("首爾", "KR"), ("seoul", "KR"),
+    ("icn", "KR"), ("gmp", "KR"),
+    ("德国", "DE"), ("德國", "DE"), ("法兰克福", "DE"), ("frankfurt", "DE"), ("fra", "DE"),
+    ("荷兰", "NL"), ("荷蘭", "NL"), ("阿姆斯特丹", "NL"), ("amsterdam", "NL"), ("ams", "NL"),
+    ("英国", "GB"), ("英國", "GB"), ("伦敦", "GB"), ("倫敦", "GB"), ("london", "GB"),
+    ("lhr", "GB"), ("法国", "FR"), ("法國", "FR"), ("巴黎", "FR"), ("paris", "FR"), ("cdg", "FR"),
+    ("加拿大", "CA"), ("多伦多", "CA"), ("toronto", "CA"), ("yyz", "CA"),
+    ("澳大利亚", "AU"), ("澳洲", "AU"), ("悉尼", "AU"), ("sydney", "AU"), ("syd", "AU"),
+    ("俄罗斯", "RU"), ("莫斯科", "RU"), ("moscow", "RU"), ("印度", "IN"), ("孟买", "IN"),
+    ("mumbai", "IN"), ("bom", "IN"), ("土耳其", "TR"), ("伊斯坦布尔", "TR"),
+    ("istanbul", "TR"), ("ist", "TR"), ("巴西", "BR"), ("圣保罗", "BR"), ("saopaulo", "BR"),
+    ("马来西亚", "MY"), ("吉隆坡", "MY"), ("kualalumpur", "MY"), ("泰国", "TH"),
+    ("曼谷", "TH"), ("bangkok", "TH"), ("越南", "VN"), ("胡志明", "VN"), ("河内", "VN"),
+    ("印尼", "ID"), ("印度尼西亚", "ID"), ("雅加达", "ID"), ("jakarta", "ID"),
+    ("菲律宾", "PH"), ("马尼拉", "PH"), ("manila", "PH"), ("阿联酋", "AE"), ("迪拜", "AE"),
+    ("dubai", "AE"), ("瑞士", "CH"), ("苏黎世", "CH"), ("zurich", "CH"), ("瑞典", "SE"),
+    ("斯德哥尔摩", "SE"), ("stockholm", "SE"), ("芬兰", "FI"), ("赫尔辛基", "FI"),
+    ("helsinki", "FI"), ("挪威", "NO"), ("奥斯陆", "NO"), ("oslo", "NO"), ("波兰", "PL"),
+    ("华沙", "PL"), ("warsaw", "PL"), ("意大利", "IT"), ("米兰", "IT"), ("milan", "IT"),
+    ("西班牙", "ES"), ("马德里", "ES"), ("madrid", "ES"), ("爱尔兰", "IE"), ("都柏林", "IE"),
+    ("奥地利", "AT"), ("维也纳", "AT"), ("vienna", "AT"), ("比利时", "BE"),
+    ("布鲁塞尔", "BE"), ("丹麦", "DK"), ("哥本哈根", "DK"), ("copenhagen", "DK"),
+    ("捷克", "CZ"), ("布拉格", "CZ"), ("prague", "CZ"), ("乌克兰", "UA"), ("基辅", "UA"),
+    ("kyiv", "UA"), ("哈萨克斯坦", "KZ"), ("almaty", "KZ"), ("澳门", "MO"), ("澳門", "MO"),
+    ("macao", "MO"), ("macau", "MO"), ("新西兰", "NZ"), ("奥克兰", "NZ"),
+    ("auckland", "NZ"), ("南非", "ZA"), ("约翰内斯堡", "ZA"), ("阿根廷", "AR"),
+    ("布宜诺斯艾利斯", "AR"), ("智利", "CL"), ("圣地亚哥", "CL"), ("墨西哥", "MX"),
+    ("以色列", "IL"), ("特拉维夫", "IL"), ("telaviv", "IL"), ("伊朗", "IR"), ("中国", "CN"),
+    ("中国大陆", "CN"),
+]
+
+
+def _flag_cc(name: str) -> str:
+    """🇯🇵 → JP：两个 regional indicator 就是一个国家/地区码"""
+    pair = ""
+    for ch in name or "":
+        if "\U0001F1E6" <= ch <= "\U0001F1FF":
+            pair += chr(ord(ch) - 0x1F1E6 + ord("A"))
+            if len(pair) == 2:
+                return pair
+        else:
+            pair = ""
+    return ""
+
+
+def _squash(name: str) -> str:
+    """去掉 emoji、符号、空白与数字，留下真正带信息的字"""
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(name or ""))
+    return re.sub(r"\d+", "", s).lower()
+
+
+def is_placeholder(name: str, groups=()) -> bool:
+    """节点名是不是"等于没说"：占位词、等于某个策略组名、或只剩 emoji/数字"""
+    low = str(name or "").strip().lower()
+    if not low:
+        return True
+    if low in PLACEHOLDER_NAMES:
+        return True
+    gs = {str(g or "").strip().lower() for g in (groups or ())}
+    if low in gs:
+        return True
+    sq = _squash(low)
+    if not sq or sq in PLACEHOLDER_NAMES:
+        return True
+    return sq in {_squash(g) for g in gs}
+
+
+def region_from_name(name: str) -> str:
+    """从节点名里认地域：🇯🇵 / 东京 / Tokyo / JP 都算"""
+    cc = _flag_cc(name)
+    if cc:
+        return cc
+    low = str(name or "").lower()
+    if not low:
+        return ""
+    tokens = {t for t in re.split(r"[^0-9a-z\u4e00-\u9fff]+", low) if t}
+    for word, code in REGION_WORDS:
+        if re.fullmatch(r"[a-z0-9]{2,3}", word):
+            if word in tokens:                 # 短码只按整词认，别把 aus→us 认错
+                return code
+        elif word in low:
+            return code
+    # JP-01 / jp01 / us1 这类：两位码后面直接跟数字
+    for t in tokens:
+        m = re.fullmatch(r"([a-z]{2,3})\d+", t)
+        if m and m.group(1) in REGION_CODES:
+            return m.group(1).upper()
+    # 最后才按整词认两字母码（jp / us / hk），顺序在长词之后
+    for t in tokens:
+        if t in REGION_CODES:
+            return t.upper()
+    return ""
+
+
+def region_from_host(host: str) -> str:
+    """从服务器地址里认地域：jp-xxx-aa-10077.node-yingyun.site / us1.example.net"""
+    low = str(host or "").strip().lower()
+    lab = low.split(".")[0]
+    if not lab:
+        return ""
+    # 前缀必须是"码 + 分隔符/数字/结尾"：node.example.com 不能读成 NO
+    m = re.match(r"([a-z]{2,3})(?:[-_]|\d|$)", lab)
+    if m and m.group(1) in REGION_CODES:
+        return m.group(1).upper()
+    for m in re.finditer(r"(?:^|[-_])([a-z]{2})(?:[-_]|\d|$)", lab):
+        if m.group(1) in REGION_CODES:
+            return m.group(1).upper()
+    return region_from_name(lab)
+
+
+def node_region(name: str, host: str = "") -> str:
+    """地域提示：先看节点名（🇯🇵 东京-01 最准），再看服务器域名"""
+    return region_from_name(name) or region_from_host(host)
+
+
+def is_pseudo_type(typ: str) -> bool:
+    """策略组 / 直连 / 拒绝 / 内置规则项：都不是"节点" """
+    t = str(typ or "").lower()
+    return (t in GROUP_TYPES or t.startswith("reject") or t.startswith("pass-")
+            or t.endswith("rule"))
+
+
+def count_nodes(items) -> int:
+    """真节点的数量：策略组、直连/拒绝这类不是节点"""
+    n = 0
+    for v in (items or {}).values() if isinstance(items, dict) else (items or []):
+        if not isinstance(v, dict):
+            continue
+        if is_pseudo_type(v.get("type")):
+            continue
+        n += 1              # 控制器的 /proxies 不带 server 字段，只能靠 type 区分组和节点
+    return n
+
+
+def parse_clash_default_group(text: str) -> str:
+    """rules 里最后一条 MATCH 指向的分组：没匹配上任何规则时就走它，也就是默认出口"""
+    m = re.search(r"^rules:[ \t]*\r?\n", text or "", re.M)
+    if not m:
+        return ""
+    seg = text[m.end():]
+    best = ""
+    for raw in seg.splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if not s.startswith("- "):
+            break
+        body = s[2:].strip().strip("\"'")
+        parts = [x.strip().strip("\"'") for x in body.split(",")]
+        if parts and parts[0].upper() in ("MATCH", "FINAL") and parts[-1]:
+            best = parts[-1]
+    return best
+
+
+def parse_json_default_outbound(text: str) -> str:
+    """sing-box 的 route.final / v2ray 的 routing 末条：默认出口的 outbound 名
+
+    route.final 经常指向一个 selector，而 selector 自己不是节点，
+    所以要顺着 default（没有就取它第一个 outbound）一直走到真节点。
+    """
+    try:
+        j = json.loads(text)
+    except Exception:
+        return ""
+    if not isinstance(j, dict):
+        return ""
+    obs: dict = {}
+    for o in j.get("outbounds") or []:
+        if isinstance(o, dict) and o.get("tag"):
+            obs[str(o["tag"])] = o
+    want = ""
+    route = j.get("route") or {}
+    if isinstance(route, dict):
+        want = str(route.get("final") or "")
+        if not want:
+            for r in reversed(route.get("rules") or []):
+                if isinstance(r, dict) and r.get("outbound"):
+                    want = str(r["outbound"])
+                    break
+    if not want:
+        for r in reversed((j.get("routing") or {}).get("rules") or []):
+            if isinstance(r, dict) and r.get("outboundTag"):
+                want = str(r["outboundTag"])
+                break
+    seen = set()
+    while want and want in obs and want not in seen:
+        seen.add(want)
+        o = obs[want]
+        if str(o.get("type") or "").lower() not in ("selector", "urltest", "load-balance"):
+            break
+        nxt = str(o.get("default") or "")
+        if not nxt:
+            cand = [str(x) for x in (o.get("outbounds") or []) if str(x) in obs]
+            nxt = cand[0] if cand else ""
+        if not nxt or nxt == want:
+            break
+        want = nxt
+    return want
+
+
+def default_group(c: "Client") -> str:
+    """这次能确定"默认走哪个组/outbound"就返回名字（读配置，不联网）"""
+    text = _read(c.config) if c and c.config else ""
+    if not text:
+        return ""
+    if c.config.lower().endswith(".json"):
+        want = parse_json_default_outbound(text)
+    else:
+        want = parse_clash_default_group(text) or parse_json_default_outbound(text)
+    name = str(want or "").strip()
+    if not name:
+        return ""
+    low = name.lower()
+    if low in ("direct", "block", "reject", "dns", "freedom", "blackhole"):
+        return ""
+    return name
 
 
 def _conf_from_cmd(cmd: str) -> tuple[str, str]:
@@ -540,6 +847,10 @@ class Client:
 
 # ---------------------------------------------------------------- 发现器
 class Registry:
+    _DNS_OK = 600.0        # 解析成功的缓存时间
+    _DNS_FAIL = 120.0      # 解析失败的缓存时间（网络恢复后能重试）
+    _DNS_MAX = 16          # 一次 tick 最多解析几个域名
+
     def __init__(self, hint: str = ""):
         self.hint = (hint or "").strip()
         self.client = Client()
@@ -549,7 +860,8 @@ class Registry:
         self._listen_at = 0.0
         self._last_tick = 0.0
         self._lock = threading.Lock()
-        self._dns: dict[str, str] = {}
+        self._dns: dict[str, tuple[str, float]] = {}
+        self._dns_rot = 0
         self._cfg_at = 0.0
         self._db_at = 0.0
         self._db_rows: list = []
@@ -823,9 +1135,9 @@ class Registry:
             c.kind = c.kind if c.kind not in ("none", "other") else "xray"
         tag = info["proxy_tag"] or "proxy"
         node = {"name": tag, "server": info["server"], "port": info["port"], "type": info["type"]}
-        self._remarks(c, node)
+        self._remarks(c, node)          # 查得到备注时会顺带数出节点总数
         c.proxies = {tag: node}
-        c.nodes = 1
+        c.nodes = max(int(c.nodes or 0), 1)     # 别把库里的总数盖成 1
 
     def _remarks(self, c: Client, node: dict):
         """v2rayN 的节点备注存在 guiNDB.db（SQLite）里，按 地址+端口 反查
@@ -835,8 +1147,19 @@ class Registry:
         """
         if not self._db_at or time.time() - self._db_at > 120:
             self._db_at = time.time()
-            self._db_rows = self._read_db(os.path.join(
-                os.path.dirname(c.config or ""), "guiNDB.db"))
+            # v2rayN 把节点备注放在 guiNDB.db，而 config.json 在 guiConfigs\ 里 ——
+            # 只查 config 所在目录永远查不到，得往上找一级、再看 exe 目录
+            dirs = []
+            for d in (os.path.dirname(c.config or ""), os.path.dirname(c.exe or ""),
+                      os.path.dirname(os.path.dirname(c.config or "")),
+                      os.path.join(os.environ.get("APPDATA", ""), "v2rayN")):
+                if d and d not in dirs:
+                    dirs.append(d)
+            self._db_rows = []
+            for d in dirs:
+                self._db_rows = self._read_db(os.path.join(d, "guiNDB.db"))
+                if self._db_rows:
+                    break
         rows = self._db_rows
         if not rows:
             return
@@ -911,23 +1234,46 @@ class Registry:
         for p in c.proxies.values():
             if p.get("server") == exit_ip:
                 return p
-        # server 是域名时再解析一批（有缓存，别每个 tick 都做）
+        # server 是域名时再解析一批：每次最多解析 _DNS_MAX 个、按 _dns_rot 轮着来，
+        # 免得一次 tick 里对着几十个机场域名挨个 getaddrinfo 把线程卡住
+        items = [(k, p) for k, p in (c.proxies or {}).items()
+                 if isinstance(p, dict) and p.get("server")]
+        if not items:
+            return {}
+        start = self._dns_rot % len(items)
+        fresh = 0
         now = time.time()
-        for name, p in list(c.proxies.items())[:24]:
-            srv = p.get("server") or ""
+        for i in range(len(items)):
+            _, p = items[(start + i) % len(items)]
+            srv = str(p.get("server") or "")
             if not srv or re.fullmatch(r"[\d.:]+", srv):
                 continue
             hit = self._dns.get(srv)
-            if hit is None:
-                try:
-                    hit = socket.getaddrinfo(srv, p.get("port") or 443,
-                                             socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
-                except Exception:
-                    hit = ""
-                self._dns[srv] = hit
-            if hit and hit == exit_ip:
+            stale = (not hit or now - hit[1] >= (self._DNS_OK if hit[0] else self._DNS_FAIL))
+            if stale:
+                fresh += 1
+                if fresh > self._DNS_MAX:
+                    break
+                hit = (self._resolve(srv, p.get("port") or 443), now)
+            if hit[0] and hit[0] == exit_ip:
                 return p
+        self._dns_rot = start + self._DNS_MAX
         return {}
+
+    def _resolve(self, host: str, port: int) -> str:
+        """域名 → IP。成功缓 10 分钟、失败只缓 2 分钟：机场节点轮换后不能一直用旧答案"""
+        now = time.time()
+        hit = self._dns.get(host)
+        if hit:
+            ip, at = hit
+            if now - at < (self._DNS_OK if ip else self._DNS_FAIL):
+                return ip
+        try:
+            ip = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        except Exception:
+            ip = ""
+        self._dns[host] = (ip, now)
+        return ip
 
 
 def preview(client: Client) -> dict:
@@ -965,24 +1311,34 @@ def parse_xray_config(text: str) -> dict:
             if listen in ("127.0.0.1", "0.0.0.0", "localhost", "::", ""):
                 out["local"] = f"127.0.0.1:{ib['port']}"
                 break
+    # 有多个带地址的 outbound 时，信路由表：末条规则（MATCH）指向哪个 tag，就用哪个
+    cands: dict[str, dict] = {}
     for ob in j.get("outbounds") or []:
-        tag = str(ob.get("tag") or "").lower()
+        if not isinstance(ob, dict):
+            continue
+        tag = str(ob.get("tag") or "")
         proto = str(ob.get("protocol") or "").lower()
-        if proto in ("freedom", "blackhole", "dns") or tag in SKIP_TAGS:
+        if proto in ("freedom", "blackhole", "dns") or tag.lower() in SKIP_TAGS:
             continue
         st = ob.get("settings") or {}
         if not isinstance(st, dict):
             continue
         arr = st.get("vnext") or st.get("servers") or []
-        if not arr:
+        if not arr or not isinstance(arr[0], dict):
             continue
         srv = str(arr[0].get("address") or "")
         if not srv:
             continue
-        out["proxy_tag"] = str(ob.get("tag") or "proxy")
-        out["server"] = srv
-        out["port"] = int(arr[0].get("port") or 0)
-        out["type"] = proto.upper()
-        break
+        cands[tag or "proxy"] = {"server": srv, "port": int(arr[0].get("port") or 0),
+                                 "type": proto.upper()}
+    if cands:
+        want = ""
+        for r in reversed((j.get("routing") or {}).get("rules") or []):
+            if isinstance(r, dict) and r.get("outboundTag"):
+                want = str(r["outboundTag"])
+                break
+        tag = want if want in cands else next(iter(cands))
+        out.update(cands[tag])
+        out["proxy_tag"] = tag
     return out
 

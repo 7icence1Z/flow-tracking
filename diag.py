@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
-import errno
 import os
 import socket
 import struct

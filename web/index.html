@@ -460,6 +460,10 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       tipIngressNote: "这是「应用 → 客户端本地口」的入口字节：其中多少进入隧道、多少按其规则直连发出，客户端不提供统计口时无法区分",
       tipProxy: "经代理：↓%s ↑%s", tipDirect: "不经代理（估算）：↓%s ↑%s",
       noRes: "失败",
+      whyConn: "按连接表判定", whyExit: "按出口 IP 判定", whyDefault: "按默认分组判定",
+      whyGlobal: "按全局模式判定", whyGroup: "按分组选择判定", whyOnly: "配置里唯一节点",
+      multiGroups: "多个分组选了不同节点 · 名字只代表其中一条",
+      whyUnknown: "只读得到出口地域，客户端没给出节点名",
     },
     en: {
       brand: "Egress monitor", connecting: "Connecting…", stale: "Collector offline",
@@ -525,6 +529,14 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       tipIngressNote: "bytes from applications to the client's local port: how much enters the tunnel versus leaves directly by rule cannot be told without the client's stats API",
       tipProxy: "Via proxy: ↓%s ↑%s", tipDirect: "Direct (estimated): ↓%s ↑%s",
       noRes: "failed",
+      whyConn: "identified from the connection table",
+      whyExit: "identified by egress IP",
+      whyDefault: "identified from the default group",
+      whyGlobal: "identified from global mode",
+      whyGroup: "identified from group selection",
+      whyOnly: "the only node in the config",
+      multiGroups: "several groups pick different nodes - the name is just one of them",
+      whyUnknown: "only the egress region is readable - the client exposes no node name",
     },
   };
   const savedLang = (localStorage.getItem("flow.lang") || "").toLowerCase();
@@ -747,6 +759,80 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     return (n || "").replace(/^node_\d+_/, "").split("|")[0].trim() || n || "";
   }
 
+  // 客户端把节点名写成占位词（鹰云这类单节点配置直接叫 "proxy"）时，
+  // 改用出口地域 + 协议来标；地域按当前语言显示，原来的名字留在 tooltip 里
+  const REGION = {
+    JP: ["日本", "Japan"], US: ["美国", "United States"], HK: ["香港", "Hong Kong"],
+    SG: ["新加坡", "Singapore"], TW: ["台湾", "Taiwan"], KR: ["韩国", "South Korea"],
+    DE: ["德国", "Germany"], NL: ["荷兰", "Netherlands"], GB: ["英国", "United Kingdom"],
+    UK: ["英国", "United Kingdom"], FR: ["法国", "France"], CA: ["加拿大", "Canada"],
+    AU: ["澳大利亚", "Australia"], RU: ["俄罗斯", "Russia"], IN: ["印度", "India"],
+    TR: ["土耳其", "Türkiye"], BR: ["巴西", "Brazil"], MY: ["马来西亚", "Malaysia"],
+    TH: ["泰国", "Thailand"], VN: ["越南", "Vietnam"], ID: ["印度尼西亚", "Indonesia"],
+    PH: ["菲律宾", "Philippines"], AE: ["阿联酋", "United Arab Emirates"],
+    CH: ["瑞士", "Switzerland"], SE: ["瑞典", "Sweden"], FI: ["芬兰", "Finland"],
+    NO: ["挪威", "Norway"], PL: ["波兰", "Poland"], IT: ["意大利", "Italy"],
+    ES: ["西班牙", "Spain"], IE: ["爱尔兰", "Ireland"], AT: ["奥地利", "Austria"],
+    BE: ["比利时", "Belgium"], DK: ["丹麦", "Denmark"], CZ: ["捷克", "Czechia"],
+    UA: ["乌克兰", "Ukraine"], KZ: ["哈萨克斯坦", "Kazakhstan"], MO: ["澳门", "Macao"],
+    NZ: ["新西兰", "New Zealand"], ZA: ["南非", "South Africa"], CN: ["中国", "China"],
+  };
+  // 表里没有的国家/地区交给 Intl.DisplayNames（Edge/Chrome 都自带，离线也能用）；
+  // 再不行才退回英文名/两位码 —— 宁可显示 "KZ"，也别显示空白
+  const DNF = {};
+  function intlRegion(code) {
+    const cc = String(code || "").toUpperCase();
+    if (!/^[A-Z]{2}$/.test(cc) || cc === "UK") return "";
+    if (!("DisplayNames" in Intl)) return "";
+    const tag = LANG === "en" ? "en" : "zh-CN";
+    try {
+      DNF[tag] = DNF[tag] || new Intl.DisplayNames([tag], { type: "region" });
+      return DNF[tag].of(cc) || "";
+    } catch (e) {
+      return "";
+    }
+  }
+  function regionLabel(code, geo) {
+    const cc = String(code || "").toUpperCase();
+    const hit = REGION[cc];
+    if (hit) return hit[LANG === "en" ? 1 : 0];
+    return intlRegion(cc) || geo || cc;
+  }
+  // 节点是不是"名字等于没说"：后端已经判过（generic），这里只用它决定怎么显示
+  function nodeName(n) {
+    if (!n) return "";
+    if (!n.generic) return nodeLabel(n.name);
+    const region = regionLabel(n.hint) || regionLabel(n.cc) || (n.geo || "");
+    const type = String(n.type || "").toUpperCase();
+    if (region && type) return `${region} · ${type}`;
+    return region || type || nodeLabel(n.name);
+  }
+  // 判定依据（后端 source）：让人知道这个名字是怎么认出来的，而不是凭空出现
+  const WHY = {
+    conn: "whyConn", exit: "whyExit", default: "whyDefault",
+    global: "whyGlobal", group: "whyGroup", only: "whyOnly",
+  };
+  function nodeTooltip(n) {
+    if (!n) return "";
+    const raw = [n.name, n.server ? `${n.server}${n.port ? ":" + n.port : ""}` : ""]
+      .filter(Boolean).join("  ");
+    const bits = [raw];
+    if (WHY[n.source]) bits.push(T(WHY[n.source]));
+    if (n.multi) bits.push(T("multiGroups"));
+    if (!raw) bits.push(T("whyUnknown"));    // 只知道出口地域，名字读不到
+    return bits.filter(Boolean).join("\n");
+  }
+  // 站点行里的链路是 "节点 > 分组"：节点那一段跟着上面的叫法走，别一边"日本 · VLESS"一边"proxy"
+  function chainLabel(chain, node) {
+    if (!chain) return "";
+    const raw = String((node || {}).name || "").trim();
+    const label = nodeName(node);
+    return String(chain).split(" > ").map(x => {
+      if (raw && x === raw && label) return label;
+      return /^node_\d+_/.test(x) || x.includes(" | ") ? nodeLabel(x) : x;
+    }).join(" > ");
+  }
+
   function ago(ts) {
     const d = Date.now() / 1000 - ts;
     if (!ts || d < 0) return "";
@@ -797,6 +883,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     return r;
   }
 
+  let nodeNow = {};          // 最近一帧的节点信息（站点行拼链路时用）
+
   function renderSites(sites) {
     const seen = new Set();
     for (const s of sites) {
@@ -816,7 +904,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
         r.uu.textContent = T("unitRemotes");
         r.dn.classList.remove("idle");
         r.up.classList.remove("idle");
-        r.el.title = `${s.label} · ${T("connsN", s.conns)} · ${T("remotesN", s.remotes)}`
+        r.el.title = `${s.label} · ${T("connsN", s.conns || 0)} · ${T("remotesN", s.remotes || 0)}`
           + (s.sample ? `\n${s.sample}` : "")
           + "\n" + T("hostTip");
         continue;
@@ -860,9 +948,13 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
       r.uu.textContent = upu;
       r.dn.classList.toggle("idle", !s.down);
       r.up.classList.toggle("idle", !s.up);
+      // 连接数是 0 时干脆不写这一截（域名归并的行本来就可能没有连接数，
+      // 以前会显示成 "chatgpt.com · undefined 条连接"）
       r.el.title = s.fixed
         ? `${s.label} · ${T("cum", fmtBytes(s.total_down), fmtBytes(s.total_up))}`
-        : `${s.label} · ${T("connsN", s.conns)}${s.ip ? " · " + s.ip : ""}${s.chain ? " · " + s.chain : ""}`
+        : [s.label, s.conns ? T("connsN", s.conns) : "", s.ip,
+           s.chain ? chainLabel(s.chain, nodeNow) : ""]
+            .filter(Boolean).join(" · ")
           + `\n${T("cum", fmtBytes(s.total_down), fmtBytes(s.total_up))}`;
       // 本机模式下这行有这么一部分是"进了客户端本地口"的：说清来源，
       // 也别说成"走了隧道"——入口字节里可能有一部分被规则直连放出去
@@ -918,6 +1010,7 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     const active = p.active || "down";
     const vpnLane = active === "vpn" || active === "mixed";
     const node = s.node || {};
+    nodeNow = node;
     const iface = s.iface || {};
     const eg = s.egress || {};
     const probes = s.probes || {};
@@ -929,8 +1022,8 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     vd.dataset.s = active;
     const label = { vpn: T("vpn"), direct: T("direct"), mixed: T("mixed"), down: T("down") }[active] || T("unknown");
     $("#verdictText").textContent = label;
-    $("#verdictSub").textContent = active === "vpn" && node.name
-      ? `${nodeLabel(node.name)} · ${eg.vpn_ip || T("pending")}`
+    $("#verdictSub").textContent = active === "vpn" && nodeName(node)
+      ? `${nodeName(node)} · ${eg.vpn_ip || T("pending")}`
       : active === "mixed" ? T("subMixed")
         : active === "direct" ? (eg.direct_ip || "") : "";
     if (isHost) {
@@ -949,9 +1042,9 @@ footer{grid-column:1/-1;display:flex;justify-content:space-between;gap:12px;flex
     lA.dataset.active = String(vpnLane);
     $("#vpnLocal").textContent = rv.ip || iface.ip || "—";
     $("#vpnNic").textContent = rv.ssid || rv.name || iface.ssid || iface.name || "—";
-    $("#vpnNode").textContent = node.name ? nodeLabel(node.name)
-      : (node.server ? shortServer(node.server) : "—");
-    $("#vpnNode").title = node.server ? `${node.name || ""} ${node.server}:${node.port}`.trim() : "";
+    $("#vpnNode").textContent = nodeName(node)
+      || (node.server ? shortServer(node.server) : "—");
+    $("#vpnNode").title = nodeTooltip(node);
     $("#vpnExit").textContent = eg.vpn_ip || T("pending");
     const conns = (s.tunnel || {}).conns || 0;
     const tn2 = s.tunnel || {};
